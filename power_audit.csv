@@ -1,10 +1,4 @@
-Device,Category,Quantity,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh
-fridge,cooling,1,12v,45,24,0.4,432.0
-maxxair fan,ventilation,1,12v,30,8,0.8,192.0
-phone charger,charging,2,ac,20,2,1.0,80.0
-laptop charger,charging,1,ac,90,2,1.0,180.0
-starlink,internet,1,ac,60,6,1.0,360.0
-lights,lighting,4,12v,10,5,1.0,200.0
-water pump,water,1,12v,60,0.5,0.3,9.0
+Device,Category,Quantity,Include,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh,Assumption Note
+lights,lighting,4,True,12v,10,5,1.0,200.0,Mapped from 'some lights'. Mapped to lights and assumed standard campervan LED lighting. Assumed quantity 4 because the phrase suggests a few interior lights.
 
-Total,,,,,,,1521.888888888889
+Total,,,,,,,,200.0,
