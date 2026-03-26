@@ -1091,6 +1091,25 @@ def build_page_html():
       const gap = 10;
       const barWidth = (plotWidth - gap * (rows.length - 1)) / rows.length;
 
+      function getSolarBarColor(value) {
+        if (value <= 0) {
+          return "#0f172a";
+        }
+        if (value <= 1.5) {
+          return "#64748b";
+        }
+        if (value <= 2.5) {
+          return "#3b82f6";
+        }
+        if (value <= 4.0) {
+          return "#22c55e";
+        }
+        if (value <= 5.5) {
+          return "#f59e0b";
+        }
+        return "#dc2626";
+      }
+
       for (let i = 0; i < rows.length; i += 1) {
         const value = typeof rows[i].solarHours === "number" ? rows[i].solarHours : 0;
         const barHeight = (value / yMax) * plotHeight;
@@ -1098,7 +1117,7 @@ def build_page_html():
         const y = pad.t + plotHeight - barHeight;
         const radius = Math.min(10, barWidth / 2, barHeight / 2);
 
-        solarCtx.fillStyle = "#f59e0b";
+        solarCtx.fillStyle = getSolarBarColor(value);
         solarCtx.beginPath();
         solarCtx.moveTo(x + radius, y);
         solarCtx.arcTo(x + barWidth, y, x + barWidth, y + barHeight, radius);
