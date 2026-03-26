@@ -1,14 +1,14 @@
 Device,Category,Quantity,Include,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh,Assumption Note
-12V fridge,appliances,1.0,True,12v,40.0,24.0,0.8,768.0,Assumed 40W power with 80% duty cycle running 24h as typical for medium 12V fridge.
-diesel heater fan,heating,1.0,True,12v,40.0,5.0,1.0,200.0,Estimated 5h runtime at 40W based on intermittent use during winter trips.
-roof fan,ventilation,1.0,True,12v,10.0,8.0,0.5,40.0,Assumed roof fan runs half of 8h period at 10W.
-LED lights,lighting,6.0,True,12v,3.0,4.0,1.0,72.0,6 lights at 3W each for 4h daily usage.
-2 phones,charging,2.0,True,ac,10.0,2.0,1.0,40.0,Each phone charger estimated at 10W for 2h daily.
-laptop,charging,1.0,True,ac,60.0,4.0,1.0,240.0,"Used occasionally for work, assumed 4h daily usage."
-camera battery charger,charging,1.0,True,ac,10.0,1.0,1.0,10.0,Used to top up camera batteries daily.
-drone batteries,charging,1.0,True,ac,20.0,1.0,1.0,20.0,Charged occasionally; estimated 1h charging at 20W.
-water pump,water,1.0,True,12v,50.0,0.5,1.0,25.0,"Runs briefly for water use, estimated half an hour daily."
-electric blanket,heating,1.0,True,12v,40.0,7.0,1.0,280.0,"Used on some winter trips at night, 7h estimated."
-induction hob,cooking,1.0,True,ac,1500.0,0.5,1.0,750.0,Used occasionally; assumed 30 minutes operation at full power.
+12V fridge,Appliance,1.0,True,12v,40.0,24.0,0.5,480.0,Typical 40W fridge running 12 hours per day.
+diesel heater fan,Heating,1.0,True,12v,60.0,4.0,0.8,192.0,Assuming fan runs 4 hours at 80% duty on winter trips.
+roof fan,Ventilation,1.0,True,12v,10.0,8.0,0.5,40.0,Runs half the day for ventilation.
+LED lights,Lighting,6.0,True,12v,3.0,4.0,0.5,36.0,"6 lights at 3W each, 4 hours daily."
+phone charger,Device Charger,2.0,True,ac,10.0,2.0,0.5,20.0,Charging duration typical.
+laptop charger,Device Charger,1.0,True,ac,50.0,4.0,0.5,100.0,Laptop used occasionally for work.
+camera battery charger,Device Charger,1.0,True,ac,10.0,1.0,0.5,5.0,Charged briefly during trips.
+drone batteries charger,Device Charger,1.0,True,ac,20.0,1.0,0.5,10.0,Used occasionally.
+water pump,Pump,1.0,True,12v,50.0,0.25,0.5,6.25,Runs briefly to maintain water supply.
+electric blanket,Heating,1.0,True,12v,40.0,6.0,0.8,192.0,Used during winter weekend trips for 6 hours at 80% duty.
+induction hob,Cooking,1.0,True,ac,1500.0,0.5,0.5,375.0,Used occasionally with sessions of around 30 minutes.
 
-Total,,,,,,,,2562.777777777778,
+Total,,,,,,,,1512.9166666666665,
