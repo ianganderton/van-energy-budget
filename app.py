@@ -1,4 +1,7 @@
 import csv
+import json
+import os
+import traceback
 
 try:
     from fastapi import FastAPI, Request
@@ -8,6 +11,11 @@ except ImportError:
     Request = None
     HTMLResponse = None
     JSONResponse = None
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 
 # A single library of known devices. Each device has:
@@ -40,6 +48,8 @@ DEVICE_LIBRARY = {
 
 INVERTER_EFFICIENCY = 0.9
 CSV_FILE = "power_audit.csv"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_FALLBACK_MODEL = "gpt-4.1-mini"
 
 
 def build_ai_prompt(user_profile):
@@ -52,300 +62,295 @@ def build_ai_prompt(user_profile):
         f"Kids: {user_profile['kids']}\n"
         f"Loads description: {user_profile['loads_description']}\n"
         "Return a practical list of daily electrical loads with quantity, category, "
-        "voltage type, watts, hours per day, and duty cycle."
+        "voltage type, watts, hours per day, duty cycle, source text, confidence, "
+        "and assumption notes as valid JSON only."
     )
 
 
-def make_audit_row(device_key, quantity=1):
-    """Build one audit row using the same structure used by the table and CSV."""
-    data = DEVICE_LIBRARY[device_key]
-    daily_wh = data["watts"] * data["hours"] * data["duty"] * quantity
+class OpenAIExtractionError(RuntimeError):
+    """Error raised when the OpenAI extraction path fails."""
 
+    def __init__(self, message, raw_response_text=""):
+        super().__init__(message)
+        self.raw_response_text = raw_response_text or ""
+
+
+def get_audit_schema():
+    """Return the JSON schema used for the OpenAI structured response."""
     return {
-        "name": device_key,
-        "category": data["category"],
-        "quantity": quantity,
-        "include": True,
-        "voltage": data["voltage"],
-        "watts": data["watts"],
-        "hours": data["hours"],
-        "duty": data["duty"],
-        "daily_wh": daily_wh,
-        "source_text": "",
-        "confidence": 0.75,
-        "assumption_note": "Mocked default load based on a typical campervan setup.",
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "category": {"type": "string"},
+                        "quantity": {"type": "number"},
+                        "include": {"type": "boolean"},
+                        "voltage": {"type": "string"},
+                        "watts": {"type": "number"},
+                        "hours": {"type": "number"},
+                        "duty": {"type": "number"},
+                        "daily_wh": {"type": "number"},
+                        "source_text": {"type": "string"},
+                        "confidence": {"type": "number"},
+                        "assumption_note": {"type": "string"},
+                    },
+                    "required": [
+                        "name",
+                        "category",
+                        "quantity",
+                        "include",
+                        "voltage",
+                        "watts",
+                        "hours",
+                        "duty",
+                        "daily_wh",
+                        "source_text",
+                        "confidence",
+                        "assumption_note",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "context_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["text", "note"],
+                    "additionalProperties": False,
+                },
+            },
+            "uncertain_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["text", "note"],
+                    "additionalProperties": False,
+                },
+            },
+            "excluded_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["text", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["rows", "context_items", "uncertain_items", "excluded_items"],
+        "additionalProperties": False,
     }
 
 
-def split_load_descriptions(loads_description):
-    """Split the messy load description into smaller parts we can review."""
-    parts = []
+def extract_response_text(response):
+    """Read plain text from a Responses API result with fallback paths."""
+    output_text = getattr(response, "output_text", "") or ""
+    if output_text:
+        return output_text.strip()
 
-    for line in str(loads_description).splitlines():
-        for part in line.split(","):
-            cleaned_part = part.strip()
-            if cleaned_part:
-                parts.append(cleaned_part)
+    output_items = getattr(response, "output", []) or []
+    for item in output_items:
+        content_items = getattr(item, "content", []) or []
+        for content_item in content_items:
+            text = getattr(content_item, "text", "") or ""
+            if text:
+                return text.strip()
 
-    return parts
+        item_text = getattr(item, "text", "") or ""
+        if item_text:
+            return item_text.strip()
 
-
-def parse_quantity_from_text(text):
-    """Read a simple leading quantity like '6 led lights'."""
-    parts = text.strip().split(maxsplit=1)
-
-    if parts and parts[0].isdigit():
-        quantity = int(parts[0])
-        remaining_text = parts[1] if len(parts) > 1 else ""
-        return quantity, remaining_text.strip()
-
-    return 1, text.strip()
+    return ""
 
 
-def infer_quantity_from_phrase(text, default_quantity, user_profile):
-    """Use a few simple phrase-based guesses for vague quantities."""
-    text_lower = text.lower()
-    adults = int(user_profile.get("adults", 0) or 0)
-    kids = int(user_profile.get("kids", 0) or 0)
+def serialize_response_debug(response):
+    """Serialize the response for terminal logging and UI error visibility."""
+    if response is None:
+        return ""
 
-    if "lots of lights" in text_lower or "a lot of lights" in text_lower:
-        return 6, "Assumed quantity 6 because the phrase suggests several lights."
-
-    if "some lights" in text_lower:
-        return 4, "Assumed quantity 4 because the phrase suggests a few interior lights."
-
-    if "outside strip light" in text_lower or "strip light" in text_lower:
-        return 4, "Assumed quantity 4 to cover a few inside lights plus one outside strip light."
-
-    if "kids charging ipads" in text_lower:
-        return 2, "Assumed quantity 2 because 'kids' suggests more than one tablet."
-
-    if "fans in summer" in text_lower:
-        return 2, "Assumed quantity 2 because the phrase suggests multiple fans in hot weather."
-
-    if "charge phones every day" in text_lower or "charging phones every day" in text_lower:
-        people_count = adults + kids
-        if people_count > 0:
-            return people_count, (
-                "Assumed quantity " + str(people_count) +
-                " based on the number of adults and kids in the profile."
-            )
-        return 2, "Assumed quantity 2 because the phrase suggests more than one daily phone charge."
-
-    return default_quantity, ""
+    try:
+        return response.model_dump_json(indent=2)
+    except Exception:
+        return str(response)
 
 
-def extract_audit_rows(user_profile):
-    """Mock the structured rows an AI tool might return later."""
-    rows_by_device = {}
-    context_items = []
-    uncertain_items = []
-    excluded_items = []
-    usage_text = str(user_profile["usage"]).lower()
+def normalize_ai_result(ai_result):
+    """Normalize the structured result so the existing table and totals flow stays stable."""
+    normalized_rows = []
 
-    high_power_review_keywords = [
-        "ryobi",
-        "tool",
-        "tools",
-        "water blaster",
-        "pressure washer",
-        "grinder",
-        "drill",
-        "saw",
-    ]
-
-    mapping_rules = [
-        {
-            "keywords": ["iphone", "phone charger", "phone", "usb charger"],
-            "device_key": "phone charger",
-            "assumption": "Mapped to phone charger and assumed a small personal charging load.",
-            "confidence": 0.95,
-        },
-        {
-            "keywords": ["laptop", "macbook", "notebook computer"],
-            "device_key": "laptop charger",
-            "assumption": "Mapped to laptop charger and assumed charging rather than full laptop runtime.",
-            "confidence": 0.9,
-        },
-        {
-            "keywords": ["bluetooth speaker", "portable speaker"],
-            "device_key": "bluetooth speaker charging",
-            "assumption": "Mapped to bluetooth speaker charging and assumed occasional USB charging.",
-            "confidence": 0.88,
-        },
-        {
-            "keywords": ["drone and batteries", "drone batteries", "drone battery", "drone"],
-            "device_key": "drone charging",
-            "assumption": "Mapped to drone charging and assumed battery charging after use.",
-            "confidence": 0.87,
-        },
-        {
-            "keywords": ["led lights", "led light", "lights", "light strip"],
-            "device_key": "lights",
-            "assumption": "Mapped to lights and assumed standard campervan LED lighting.",
-            "confidence": 0.94,
-        },
-        {
-            "keywords": ["ipad", "ipads", "tablet"],
-            "device_key": "tablet charging",
-            "assumption": "Mapped to tablet charging and assumed evening charging for personal devices.",
-            "confidence": 0.89,
-        },
-        {
-            "keywords": ["starlink", "satellite internet"],
-            "device_key": "starlink",
-            "assumption": "Mapped directly to Starlink internet equipment.",
-            "confidence": 0.98,
-        },
-        {
-            "keywords": ["camera charger", "camera battery", "camera gear"],
-            "device_key": "camera battery charger",
-            "assumption": "Mapped to camera battery charger and assumed regular battery charging.",
-            "confidence": 0.86,
-        },
-        {
-            "keywords": ["diesel heater", "heater"],
-            "device_key": "diesel heater",
-            "assumption": "Mapped to diesel heater and assumed a normal overnight duty cycle.",
-            "confidence": 0.82,
-        },
-        {
-            "keywords": ["water pump", "sink pump", "pump"],
-            "device_key": "water pump",
-            "assumption": "Mapped to water pump and assumed short daily use.",
-            "confidence": 0.84,
-        },
-        {
-            "keywords": ["maxxair fan", "maxxfan", "roof fan"],
-            "device_key": "maxxair fan",
-            "assumption": "Mapped to roof ventilation fan and assumed a typical daily runtime.",
-            "confidence": 0.9,
-        },
-        {
-            "keywords": ["fans", "fan", "summer ventilation"],
-            "device_key": "fan",
-            "assumption": "Mapped to fan ventilation and assumed use during warmer weather.",
-            "confidence": 0.76,
-        },
-        {
-            "keywords": ["fridge", "compressor fridge"],
-            "device_key": "compressor fridge",
-            "assumption": "Mapped to compressor fridge and assumed a standard 12V duty cycle.",
-            "confidence": 0.91,
-        },
-        {
-            "keywords": ["tv", "television"],
-            "device_key": "tv",
-            "assumption": "Mapped to TV use and assumed a few evening viewing hours.",
-            "confidence": 0.9,
-        },
-        {
-            "keywords": ["coffee machine", "espresso machine", "coffee maker"],
-            "device_key": "coffee machine",
-            "assumption": "Mapped to coffee machine use and assumed short morning runs.",
-            "confidence": 0.85,
-        },
-        {
-            "keywords": ["induction cooktop", "induction stove", "cooktop"],
-            "device_key": "induction cooktop",
-            "assumption": "Mapped to induction cooktop and assumed short cooking sessions.",
-            "confidence": 0.89,
-        },
-        {
-            "keywords": ["microwave"],
-            "device_key": "microwave",
-            "assumption": "Mapped to microwave and assumed short heating use.",
-            "confidence": 0.96,
-        },
-    ]
-
-    if "remote" in usage_text or "work" in usage_text:
-        row = make_audit_row("laptop charger")
-        row["source_text"] = str(user_profile["usage"])
-        row["confidence"] = 0.67
-        row["assumption_note"] = (
-            "Mapped from usage '" + str(user_profile["usage"]) +
-            "' and assumed remote work means at least one laptop charger."
-        )
-        rows_by_device[row["name"]] = row
-
-    for part in split_load_descriptions(user_profile["loads_description"]):
-        quantity, cleaned_part = parse_quantity_from_text(part)
-        part_lower = cleaned_part.lower()
-
-        if (
-            ("trip" in part_lower and "light" not in part_lower)
-            or ("trips" in part_lower and "light" not in part_lower)
-            or ("new zealand" in part_lower and "light" not in part_lower)
-            or ("mountain bike" in part_lower and "light" not in part_lower)
-            or "family of four" in part_lower
-            or "bigger motorhome" in part_lower
-            or ("motorhome" in part_lower and "light" not in part_lower)
-            or "transit van setup" in part_lower
-            or "van setup" in part_lower
-            or "camper setup" in part_lower
-            or "vehicle setup" in part_lower
-            or "plug into mains" in part_lower
-            or "plugged into mains" in part_lower
-            or "shore power" in part_lower
-        ):
-            context_items.append(
-                {
-                    "text": part,
-                    "note": "Useful living or trip context, but not treated as a direct electrical load.",
-                }
-            )
-            continue
-
-        if any(keyword in part_lower for keyword in high_power_review_keywords):
-            excluded_items.append(
-                {
-                    "text": part,
-                    "reason": "Looks like an occasional tool or high-power load, so it was excluded from the draft audit.",
-                }
-            )
-            continue
-
-        matched_rule = None
-        for rule in mapping_rules:
-            if any(keyword in part_lower for keyword in rule["keywords"]):
-                matched_rule = rule
-                break
-
-        if matched_rule is None:
-            uncertain_items.append(
-                {
-                    "text": part,
-                    "note": "This load was mentioned, but it was not confidently mapped to a known device yet.",
-                }
-            )
-            continue
-
-        device_key = matched_rule["device_key"]
-        quantity, quantity_note = infer_quantity_from_phrase(cleaned_part, quantity, user_profile)
-        row = rows_by_device.get(device_key)
-
-        if row is None:
-            row = make_audit_row(device_key, quantity)
-            row["source_text"] = part
-            row["confidence"] = matched_rule["confidence"]
-            row["assumption_note"] = (
-                "Mapped from '" + part + "'. " + matched_rule["assumption"]
-            )
-            if quantity_note:
-                row["assumption_note"] += " " + quantity_note
-            rows_by_device[device_key] = row
+    for row in ai_result.get("rows", []):
+        voltage_value = str(row.get("voltage", "")).strip().lower()
+        if voltage_value in {"12v", "12 v", "dc", "12 volt", "12 volts"}:
+            normalized_voltage = "12v"
+        elif voltage_value in {"ac", "230v", "230 v", "240v", "240 v", "120v", "120 v", "mains"}:
+            normalized_voltage = "ac"
         else:
-            row["quantity"] += quantity
-            row["daily_wh"] = row["watts"] * row["hours"] * row["duty"] * row["quantity"]
-            row["source_text"] += "; " + part
-            row["confidence"] = min(row["confidence"], matched_rule["confidence"])
-            row["assumption_note"] += " Also matched '" + part + "'."
-            if quantity_note:
-                row["assumption_note"] += " " + quantity_note
+            normalized_voltage = voltage_value
 
-    rows = list(rows_by_device.values())
-    return rows, context_items, uncertain_items, excluded_items
+        normalized_row = {
+            "name": str(row.get("name", "")).strip(),
+            "category": str(row.get("category", "")).strip(),
+            "quantity": float(row.get("quantity", 1)),
+            "include": bool(row.get("include", True)),
+            "voltage": normalized_voltage,
+            "watts": float(row.get("watts", 0)),
+            "hours": float(row.get("hours", 0)),
+            "duty": float(row.get("duty", 1)),
+            "daily_wh": float(row.get("daily_wh", 0)),
+            "source_text": str(row.get("source_text", "")).strip(),
+            "confidence": float(row.get("confidence", 0)),
+            "assumption_note": str(row.get("assumption_note", "")).strip(),
+        }
+
+        recalculated_daily_wh = (
+            normalized_row["quantity"]
+            * normalized_row["watts"]
+            * normalized_row["hours"]
+            * normalized_row["duty"]
+        )
+        normalized_row["daily_wh"] = round(recalculated_daily_wh, 2)
+        normalized_rows.append(normalized_row)
+
+    return {
+        "rows": normalized_rows,
+        "context_items": ai_result.get("context_items", []),
+        "uncertain_items": ai_result.get("uncertain_items", []),
+        "excluded_items": ai_result.get("excluded_items", []),
+    }
+
+
+def build_openai_request(model_name, user_profile):
+    """Build a single Responses API request body for the configured model."""
+    request = {
+        "model": model_name,
+        "instructions": (
+            "You extract structured JSON data for a campervan power audit. "
+            "Return JSON only. Do not wrap it in markdown. "
+            "Keep it concise but complete. "
+            "Prefer common campervan defaults. "
+            "Use only '12v' or 'ac' for the voltage field. "
+            "Every numeric field must be realistic and greater than zero where applicable."
+        ),
+        "input": (
+            "Create a campervan/off-grid power audit.\n"
+            "Use only the most likely daily loads mentioned or clearly implied.\n"
+            "Keep rows compact and assumption notes short.\n\n"
+            f"Van size: {user_profile['van_size']}\n"
+            f"Usage: {user_profile['usage']}\n"
+            f"Adults: {user_profile['adults']}\n"
+            f"Kids: {user_profile['kids']}\n"
+            f"Loads description: {user_profile['loads_description']}\n"
+        ),
+        "max_output_tokens": 1800,
+        "parallel_tool_calls": False,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "campervan_power_audit",
+                "schema": get_audit_schema(),
+                "strict": True,
+            },
+            "verbosity": "medium",
+        },
+    }
+
+    if model_name.startswith("gpt-5"):
+        request["text"]["verbosity"] = "low"
+        request["reasoning"] = {"effort": "low"}
+
+    return request
+
+
+def extract_audit_with_openai(user_profile):
+    """Call OpenAI Responses API and return structured audit data."""
+    if OpenAI is None:
+        raise OpenAIExtractionError("The OpenAI Python SDK is not installed in this environment.")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise OpenAIExtractionError("OPENAI_API_KEY is missing. Add it to your environment and try again.")
+
+    client = OpenAI(api_key=api_key, timeout=20.0)
+    models_to_try = [OPENAI_MODEL]
+    if OPENAI_FALLBACK_MODEL not in models_to_try:
+        models_to_try.append(OPENAI_FALLBACK_MODEL)
+
+    last_error = None
+
+    for model_name in models_to_try:
+        response = None
+        try:
+            response = client.responses.create(**build_openai_request(model_name, user_profile))
+        except Exception as error:
+            error_text = str(error)
+            if "timed out" in error_text.lower():
+                last_error = OpenAIExtractionError(
+                    "OpenAI request timed out before the model returned JSON. "
+                    f"Current model: {model_name}. Try again or use a faster model via OPENAI_MODEL."
+                )
+            else:
+                last_error = OpenAIExtractionError(f"OpenAI request failed with model {model_name}: {error}")
+
+            if model_name != models_to_try[-1]:
+                print(f"OPENAI RETRY: model {model_name} failed, trying {models_to_try[-1]}")
+                continue
+            raise last_error from error
+
+        raw_text = extract_response_text(response)
+        print(f"OPENAI RAW RESPONSE TEXT [{model_name}]:", raw_text)
+
+        if not raw_text:
+            response_debug = serialize_response_debug(response)
+            print(f"OPENAI FULL RESPONSE [{model_name}]:", response_debug)
+            response_error = getattr(response, "error", None)
+            response_status = getattr(response, "status", None)
+            incomplete_details = getattr(response, "incomplete_details", None)
+            error_message = f"OpenAI returned an empty response with model {model_name}."
+            if response_status:
+                error_message = f"{error_message} Status: {response_status}."
+            if incomplete_details:
+                error_message = f"{error_message} Incomplete details: {incomplete_details}."
+            if response_error:
+                error_message = f"{error_message} {response_error}"
+            last_error = OpenAIExtractionError(error_message, raw_response_text=response_debug)
+            if model_name != models_to_try[-1]:
+                print(f"OPENAI RETRY: model {model_name} returned no text, trying {models_to_try[-1]}")
+                continue
+            raise last_error
+
+        try:
+            parsed_result = json.loads(raw_text)
+            normalized_result = normalize_ai_result(parsed_result)
+            normalized_result["raw_response_text"] = raw_text
+            return normalized_result
+        except json.JSONDecodeError as error:
+            last_error = OpenAIExtractionError(
+                f"OpenAI returned invalid JSON with model {model_name}: {error}",
+                raw_response_text=raw_text,
+            )
+            if model_name != models_to_try[-1]:
+                print(f"OPENAI RETRY: model {model_name} returned truncated JSON, trying {models_to_try[-1]}")
+                continue
+            raise last_error from error
+
+    if last_error is not None:
+        raise last_error
+    raise OpenAIExtractionError("OpenAI extraction failed before a response could be parsed.")
 
 
 def calculate_totals(devices):
@@ -403,24 +408,20 @@ def export_csv(devices, overall_total):
 
 
 def build_audit_result(user_profile):
-    """Build the mocked audit result and reuse the existing totals/export logic."""
+    """Build the audit result and reuse the existing totals/export logic."""
     prompt = build_ai_prompt(user_profile)
-    rows, context_items, uncertain_items, excluded_items = extract_audit_rows(user_profile)
+    ai_result = extract_audit_with_openai(user_profile)
+    rows = ai_result["rows"]
+    context_items = ai_result["context_items"]
+    uncertain_items = ai_result["uncertain_items"]
+    excluded_items = ai_result["excluded_items"]
     included_rows = [row for row in rows if row.get("include", True)]
     dc_total, ac_total, overall_total = calculate_totals(included_rows)
     export_csv(rows, overall_total)
 
-    raw_ai_response = {
-        "rows": rows,
-        "context_items": context_items,
-        "uncertain_items": uncertain_items,
-        "excluded_items": excluded_items,
-        "note": "This is mocked structured output that stands in for a future AI response.",
-    }
-
     return {
         "prompt": prompt,
-        "raw_ai_response": raw_ai_response,
+        "raw_ai_response": ai_result["raw_response_text"],
         "rows": rows,
         "context_items": context_items,
         "uncertain_items": uncertain_items,
@@ -623,7 +624,7 @@ def build_page_html():
   <div class="page">
     <div class="hero">
       <h1>Van Power Audit</h1>
-      <p>Fill in a few details, generate a mocked AI draft audit, and tweak the table directly in your browser.</p>
+      <p>Fill in a few details, generate an AI draft audit, and tweak the table directly in your browser.</p>
     </div>
 
     <div class="panel">
@@ -863,7 +864,7 @@ def build_page_html():
     }
 
     async function generateAudit() {
-      statusBox.textContent = "Generating mocked audit...";
+      statusBox.textContent = "Generating audit...";
 
       const payload = {
         van_size: document.getElementById("van_size").value,
@@ -880,13 +881,16 @@ def build_page_html():
       });
 
       if (!response.ok) {
-        statusBox.textContent = "Something went wrong while generating the audit.";
+        const errorResult = await response.json();
+        statusBox.textContent = errorResult.error || "OpenAI request failed.";
+        rawResponseBox.textContent = errorResult.raw_ai_response || "";
+        results.classList.add("visible");
         return;
       }
 
       const result = await response.json();
       promptBox.textContent = result.prompt;
-      rawResponseBox.textContent = JSON.stringify(result.raw_ai_response, null, 2);
+      rawResponseBox.textContent = result.raw_ai_response || "";
       renderTable(result.rows);
       renderTotals(result.totals);
       renderReviewItems(result.context_items, result.uncertain_items, result.excluded_items);
@@ -919,18 +923,29 @@ if FastAPI is not None:
 
     @app.post("/generate")
     async def generate(request: Request):
-        payload = await request.json()
+        try:
+            payload = await request.json()
 
-        user_profile = {
-            "van_size": payload.get("van_size", "medium"),
-            "usage": payload.get("usage", "weekend"),
-            "adults": payload.get("adults", 2),
-            "kids": payload.get("kids", 0),
-            "loads_description": payload.get("loads_description", ""),
-        }
+            user_profile = {
+                "van_size": payload.get("van_size", "medium"),
+                "usage": payload.get("usage", "weekend"),
+                "adults": payload.get("adults", 2),
+                "kids": payload.get("kids", 0),
+                "loads_description": payload.get("loads_description", ""),
+            }
 
-        result = build_audit_result(user_profile)
-        return JSONResponse(result)
+            result = build_audit_result(user_profile)
+            return JSONResponse(result)
+        except Exception as e:
+            print("OPENAI ERROR:", e)
+            traceback.print_exc()
+            return JSONResponse(
+                {
+                    "error": str(e),
+                    "raw_ai_response": getattr(e, "raw_response_text", ""),
+                },
+                status_code=500,
+            )
 
 else:
     app = None

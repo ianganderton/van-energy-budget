@@ -1,4 +1,11 @@
 Device,Category,Quantity,Include,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh,Assumption Note
-lights,lighting,4,True,12v,10,5,1.0,200.0,Mapped from 'some lights'. Mapped to lights and assumed standard campervan LED lighting. Assumed quantity 4 because the phrase suggests a few interior lights.
+Fridge Freezer,Appliance,1.0,True,12v,45.0,24.0,0.5,540.0,Typical fridge freezer power usage in campervan
+iPads Charging,Devices,4.0,True,ac,12.0,3.0,1.0,144.0,Standard tablet charger power
+TV,Entertainment,1.0,True,ac,60.0,4.0,1.0,240.0,Medium size LED TV typical usage
+Coffee Machine,Appliance,1.0,True,ac,1000.0,0.25,1.0,250.0,Most coffee machines ~1000W
+Microwave,Appliance,1.0,True,ac,1000.0,0.25,0.5,125.0,Microwave typical power and usage
+Lights,Lighting,10.0,True,12v,5.0,5.0,1.0,250.0,LED lighting typical wattage
+Fans,Appliance,2.0,True,12v,10.0,8.0,1.0,160.0,Low power 12V fans
+Starlink,Electronics,1.0,True,ac,100.0,6.0,1.0,600.0,Starlink typical power usage
 
-Total,,,,,,,,200.0,
+Total,,,,,,,,2460.0,
