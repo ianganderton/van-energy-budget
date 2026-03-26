@@ -208,14 +208,15 @@ def export_csv(devices, overall_total):
 
 
 def main():
-    print("Enter devices. Press Enter on a blank line when finished:")
+    print("Enter devices. Press Ctrl+D (or Ctrl+Z on Windows) when finished:")
     input_lines = []
 
-    while True:
-        line = input()
-        if line == "":
-            break
-        input_lines.append(line)
+    try:
+        while True:
+            line = input()
+            input_lines.append(line)
+    except EOFError:
+        pass
 
     user_input = "\n".join(input_lines)
     device_names = parse_device_names(user_input)
