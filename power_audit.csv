@@ -1,5 +1,10 @@
 Device,Category,Quantity,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh
 fridge,cooling,1,12v,45,24,0.4,432.0
 phone charger,charging,2,ac,20,2,1.0,80.0
+lights,lighting,5,12v,10,5,1.0,250.0
+maxxair fan,ventilation,1,12v,30,8,0.8,192.0
+starlink,internet,1,ac,60,6,1.0,360.0
+diesel heater,ventilation,1,12v,40,8,0.5,160.0
+water pump,water,1,12v,60,0.5,0.3,9.0
 
-Total,,,,,,,520.8888888888889
+Total,,,,,,,1531.888888888889

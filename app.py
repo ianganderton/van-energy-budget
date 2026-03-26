@@ -47,8 +47,16 @@ CSV_FILE = "power_audit.csv"
 
 
 def parse_device_names(user_input):
-    """Split a comma-separated list like 'fridge, laptop, fan' into clean names."""
-    return [name.strip().lower() for name in user_input.split(",") if name.strip()]
+    """Split a comma-separated or multi-line list into clean device names."""
+    device_names = []
+
+    for line in user_input.splitlines():
+        for name in line.split(","):
+            cleaned_name = name.strip().lower()
+            if cleaned_name:
+                device_names.append(cleaned_name)
+
+    return device_names
 
 
 def parse_quantity_and_name(raw_name):
@@ -90,7 +98,7 @@ def resolve_device_name(name):
 
 def build_device_rows(device_names):
     """Turn device names into rows we can print and export."""
-    devices = []
+    devices_by_key = {}
     unknown_devices = []
 
     for raw_name in device_names:
@@ -104,19 +112,22 @@ def build_device_rows(device_names):
         data = DEVICE_LIBRARY[device_key]
         daily_wh = data["watts"] * data["hours"] * data["duty"] * quantity
 
-        devices.append(
-            {
+        if device_key not in devices_by_key:
+            devices_by_key[device_key] = {
                 "name": device_key,
                 "category": data["category"],
-                "quantity": quantity,
+                "quantity": 0,
                 "voltage": data["voltage"],
                 "watts": data["watts"],
                 "hours": data["hours"],
                 "duty": data["duty"],
-                "daily_wh": daily_wh,
+                "daily_wh": 0,
             }
-        )
 
+        devices_by_key[device_key]["quantity"] += quantity
+        devices_by_key[device_key]["daily_wh"] += daily_wh
+
+    devices = list(devices_by_key.values())
     return devices, unknown_devices
 
 
@@ -197,7 +208,16 @@ def export_csv(devices, overall_total):
 
 
 def main():
-    user_input = input("Enter devices: ")
+    print("Enter devices. Press Enter on a blank line when finished:")
+    input_lines = []
+
+    while True:
+        line = input()
+        if line == "":
+            break
+        input_lines.append(line)
+
+    user_input = "\n".join(input_lines)
     device_names = parse_device_names(user_input)
     devices, unknown_devices = build_device_rows(device_names)
     dc_total, ac_total, overall_total = calculate_totals(devices)
