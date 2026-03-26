@@ -5,11 +5,22 @@ import csv
 # - hours: daily runtime
 # - duty: how often it is actually running during those hours
 # - voltage: either "12v" or "ac"
+# - category: a simple label to group similar devices
 DEVICE_LIBRARY = {
-    "fridge": {"watts": 45, "hours": 24, "duty": 0.4, "voltage": "12v"},
-    "laptop": {"watts": 60, "hours": 2, "duty": 1.0, "voltage": "ac"},
-    "fan": {"watts": 20, "hours": 5, "duty": 0.7, "voltage": "12v"},
-    "lights": {"watts": 10, "hours": 5, "duty": 1.0, "voltage": "12v"},
+    "fridge": {"watts": 45, "hours": 24, "duty": 0.4, "voltage": "12v", "category": "cooling"},
+    "laptop": {"watts": 60, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
+    "fan": {"watts": 20, "hours": 5, "duty": 0.7, "voltage": "12v", "category": "ventilation"},
+    "lights": {"watts": 10, "hours": 5, "duty": 1.0, "voltage": "12v", "category": "lighting"},
+    "phone charger": {"watts": 20, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
+    "diesel heater": {"watts": 40, "hours": 8, "duty": 0.5, "voltage": "12v", "category": "ventilation"},
+    "water pump": {"watts": 60, "hours": 0.5, "duty": 0.3, "voltage": "12v", "category": "water"},
+    "maxxair fan": {"watts": 30, "hours": 8, "duty": 0.8, "voltage": "12v", "category": "ventilation"},
+    "compressor fridge": {"watts": 50, "hours": 24, "duty": 0.35, "voltage": "12v", "category": "cooling"},
+    "laptop charger": {"watts": 90, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
+    "camera battery charger": {"watts": 25, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
+    "starlink": {"watts": 60, "hours": 6, "duty": 1.0, "voltage": "ac", "category": "internet"},
+    "induction cooktop": {"watts": 1800, "hours": 0.5, "duty": 1.0, "voltage": "ac", "category": "cooking"},
+    "microwave": {"watts": 1000, "hours": 0.25, "duty": 1.0, "voltage": "ac", "category": "cooking"},
 }
 
 # Friendly names that should map back to the main device keys.
@@ -17,8 +28,18 @@ DEVICE_LIBRARY = {
 # we treat it as a match.
 DEVICE_ALIASES = {
     "fridge": ["small fridge", "12v fridge"],
+    "phone charger": ["phone", "usb charger", "iphone charger", "android charger"],
+    "diesel heater": ["heater", "parking heater", "air heater"],
+    "water pump": ["pump", "sink pump", "fresh water pump"],
     "fan": ["roof fan"],
     "lights": ["led lights"],
+    "maxxair fan": ["maxxfan", "maxxair", "ceiling fan"],
+    "compressor fridge": ["12v compressor fridge", "van fridge", "cooler fridge"],
+    "laptop charger": ["charger for laptop", "computer charger", "usb-c laptop charger"],
+    "camera battery charger": ["camera charger", "battery charger", "camera batteries"],
+    "starlink": ["internet", "satellite internet", "wifi dish"],
+    "induction cooktop": ["cooktop", "induction stove", "induction hob"],
+    "microwave": ["microwave oven"],
 }
 
 INVERTER_EFFICIENCY = 0.9
@@ -30,14 +51,38 @@ def parse_device_names(user_input):
     return [name.strip().lower() for name in user_input.split(",") if name.strip()]
 
 
+def parse_quantity_and_name(raw_name):
+    """Read an optional leading quantity like '2 phone chargers'."""
+    parts = raw_name.split(maxsplit=1)
+
+    if parts and parts[0].isdigit():
+        quantity = int(parts[0])
+        name = parts[1] if len(parts) > 1 else ""
+        return quantity, name.strip()
+
+    return 1, raw_name
+
+
+def singularize_name(name):
+    """Make a simple singular version for inputs like 'laptops'."""
+    if name.endswith("s") and len(name) > 1:
+        return name[:-1]
+
+    return name
+
+
 def resolve_device_name(name):
     """Return the main device key for an exact name or a simple alias match."""
     if name in DEVICE_LIBRARY:
         return name
 
+    singular_name = singularize_name(name)
+    if singular_name in DEVICE_LIBRARY:
+        return singular_name
+
     for device_key, aliases in DEVICE_ALIASES.items():
         for alias in aliases:
-            if alias in name:
+            if alias in name or alias in singular_name:
                 return device_key
 
     return None
@@ -46,20 +91,24 @@ def resolve_device_name(name):
 def build_device_rows(device_names):
     """Turn device names into rows we can print and export."""
     devices = []
+    unknown_devices = []
 
     for raw_name in device_names:
-        device_key = resolve_device_name(raw_name)
+        quantity, name = parse_quantity_and_name(raw_name)
+        device_key = resolve_device_name(name)
 
         if device_key is None:
-            print(f"Unknown device: {raw_name}")
+            unknown_devices.append(raw_name)
             continue
 
         data = DEVICE_LIBRARY[device_key]
-        daily_wh = data["watts"] * data["hours"] * data["duty"]
+        daily_wh = data["watts"] * data["hours"] * data["duty"] * quantity
 
         devices.append(
             {
                 "name": device_key,
+                "category": data["category"],
+                "quantity": quantity,
                 "voltage": data["voltage"],
                 "watts": data["watts"],
                 "hours": data["hours"],
@@ -68,7 +117,7 @@ def build_device_rows(device_names):
             }
         )
 
-    return devices
+    return devices, unknown_devices
 
 
 def calculate_totals(devices):
@@ -88,12 +137,14 @@ def calculate_totals(devices):
 
 def print_report(devices, dc_total, ac_total, overall_total):
     """Show the results in a simple table."""
-    print("\nDevice\t\tType\tWatts\tHours\tDuty\tDaily Wh")
-    print("-" * 65)
+    print("\nDevice\t\tCategory\tQty\tType\tWatts\tHours\tDuty\tDaily Wh")
+    print("-" * 98)
 
     for device in devices:
         print(
             f"{device['name']:<15}"
+            f"{device['category']:<16}"
+            f"{device['quantity']:<8}"
             f"{device['voltage']:<8}"
             f"{device['watts']:<8}"
             f"{device['hours']:<8}"
@@ -101,22 +152,36 @@ def print_report(devices, dc_total, ac_total, overall_total):
             f"{device['daily_wh']:.0f}"
         )
 
-    print("-" * 65)
+    print("-" * 98)
     print(f"12V Total: {dc_total:.0f} Wh/day")
     print(f"AC Total: {ac_total:.0f} Wh/day")
     print(f"Overall Total: {overall_total:.0f} Wh/day")
+
+
+def print_unknown_devices(unknown_devices):
+    """Show any devices we could not match."""
+    if not unknown_devices:
+        return
+
+    print("\nUnknown devices")
+    print("-" * 30)
+
+    for device_name in unknown_devices:
+        print(device_name)
 
 
 def export_csv(devices, overall_total):
     """Save the device list and total to a CSV file."""
     with open(CSV_FILE, "w", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(["Device", "Voltage Type", "Watts", "Hours", "Duty Cycle", "Daily Wh"])
+        writer.writerow(["Device", "Category", "Quantity", "Voltage Type", "Watts", "Hours", "Duty Cycle", "Daily Wh"])
 
         for device in devices:
             writer.writerow(
                 [
                     device["name"],
+                    device["category"],
+                    device["quantity"],
                     device["voltage"],
                     device["watts"],
                     device["hours"],
@@ -126,7 +191,7 @@ def export_csv(devices, overall_total):
             )
 
         writer.writerow([])
-        writer.writerow(["Total", "", "", "", "", overall_total])
+        writer.writerow(["Total", "", "", "", "", "", "", overall_total])
 
     print(f"Saved to {CSV_FILE}")
 
@@ -134,10 +199,11 @@ def export_csv(devices, overall_total):
 def main():
     user_input = input("Enter devices: ")
     device_names = parse_device_names(user_input)
-    devices = build_device_rows(device_names)
+    devices, unknown_devices = build_device_rows(device_names)
     dc_total, ac_total, overall_total = calculate_totals(devices)
 
     print_report(devices, dc_total, ac_total, overall_total)
+    print_unknown_devices(unknown_devices)
     export_csv(devices, overall_total)
 
 
