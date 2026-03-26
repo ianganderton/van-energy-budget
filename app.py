@@ -18,53 +18,59 @@ except ImportError:
     OpenAI = None
 
 
-# A single library of known devices. Each device has:
-# - watts: power draw
-# - hours: daily runtime
-# - duty: how often it is actually running during those hours
-# - voltage: either "12v" or "ac"
-# - category: a simple label to group similar devices
-DEVICE_LIBRARY = {
-    "fridge": {"watts": 45, "hours": 24, "duty": 0.4, "voltage": "12v", "category": "cooling"},
-    "laptop": {"watts": 60, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
-    "fan": {"watts": 20, "hours": 5, "duty": 0.7, "voltage": "12v", "category": "ventilation"},
-    "lights": {"watts": 10, "hours": 5, "duty": 1.0, "voltage": "12v", "category": "lighting"},
-    "bluetooth speaker charging": {"watts": 15, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
-    "drone charging": {"watts": 80, "hours": 1.5, "duty": 1.0, "voltage": "ac", "category": "charging"},
-    "phone charger": {"watts": 20, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
-    "tablet charging": {"watts": 20, "hours": 3, "duty": 1.0, "voltage": "ac", "category": "charging"},
-    "diesel heater": {"watts": 40, "hours": 8, "duty": 0.5, "voltage": "12v", "category": "ventilation"},
-    "water pump": {"watts": 60, "hours": 0.5, "duty": 0.3, "voltage": "12v", "category": "water"},
-    "maxxair fan": {"watts": 30, "hours": 8, "duty": 0.8, "voltage": "12v", "category": "ventilation"},
-    "compressor fridge": {"watts": 50, "hours": 24, "duty": 0.35, "voltage": "12v", "category": "cooling"},
-    "laptop charger": {"watts": 90, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
-    "camera battery charger": {"watts": 25, "hours": 2, "duty": 1.0, "voltage": "ac", "category": "charging"},
-    "starlink": {"watts": 60, "hours": 6, "duty": 1.0, "voltage": "ac", "category": "internet"},
-    "tv": {"watts": 60, "hours": 3, "duty": 1.0, "voltage": "ac", "category": "entertainment"},
-    "coffee machine": {"watts": 1200, "hours": 0.2, "duty": 1.0, "voltage": "ac", "category": "cooking"},
-    "induction cooktop": {"watts": 1800, "hours": 0.5, "duty": 1.0, "voltage": "ac", "category": "cooking"},
-    "microwave": {"watts": 1000, "hours": 0.25, "duty": 1.0, "voltage": "ac", "category": "cooking"},
-}
-
 INVERTER_EFFICIENCY = 0.9
 CSV_FILE = "power_audit.csv"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_FALLBACK_MODEL = "gpt-4.1-mini"
 
 
-def build_ai_prompt(user_profile):
-    """Turn the user profile into a clear prompt string for a future AI step."""
+def format_user_profile(user_profile):
+    """Format the user profile into a stable block of text for the prompt and UI."""
     return (
-        "Create a campervan/off-grid power audit.\n"
         f"Van size: {user_profile['van_size']}\n"
         f"Usage: {user_profile['usage']}\n"
         f"Adults: {user_profile['adults']}\n"
         f"Kids: {user_profile['kids']}\n"
-        f"Loads description: {user_profile['loads_description']}\n"
+        f"Lifestyle / van use context: {user_profile['use_case_notes']}\n"
+        f"Electrical devices: {user_profile['loads_description']}\n"
+    )
+
+
+def build_audit_prompt(user_profile):
+    """Turn the user profile into a readable prompt string for the UI."""
+    return (
+        "Create a campervan/off-grid power audit.\n"
+        f"{format_user_profile(user_profile)}"
+        "Use the electrical devices field as the only source for generating load rows.\n"
+        "Every row must map directly to a device explicitly mentioned in the electrical devices field.\n"
+        "Do not create new devices based only on lifestyle context.\n"
+        "Do not merge lifestyle context into source_text.\n"
+        "source_text must only reference the electrical devices field.\n"
+        "source_text must be an exact substring or direct extract from the electrical devices field.\n"
+        "Do not reword, summarise, or interpret source_text.\n"
+        "Preserve the original wording in source_text as much as possible.\n"
+        "The name field can be normalised or cleaned, but source_text must remain raw.\n"
+        "Use the lifestyle / van use context only to adjust hours per day, adjust duty cycle, "
+        "add assumption notes, and identify uncertain_items and context_items.\n"
+        "If lifestyle context suggests a device that is not listed, do not add it as a row. "
+        "Instead include it in uncertain_items as a possible missing load.\n"
+        "If there is any conflict, always prefer the electrical devices field over lifestyle context.\n"
         "Return a practical list of daily electrical loads with quantity, category, "
         "voltage type, watts, hours per day, duty cycle, source text, confidence, "
         "and assumption notes as valid JSON only."
     )
+
+
+def build_user_profile(payload):
+    """Normalize the request payload into the shape used by the app."""
+    return {
+        "van_size": payload.get("van_size", "medium"),
+        "usage": payload.get("usage", "weekend"),
+        "adults": payload.get("adults", 2),
+        "kids": payload.get("kids", 0),
+        "use_case_notes": payload.get("use_case_notes", ""),
+        "loads_description": payload.get("loads_description", ""),
+    }
 
 
 class OpenAIExtractionError(RuntimeError):
@@ -244,17 +250,27 @@ def build_openai_request(model_name, user_profile):
             "Keep it concise but complete. "
             "Prefer common campervan defaults. "
             "Use only '12v' or 'ac' for the voltage field. "
-            "Every numeric field must be realistic and greater than zero where applicable."
+            "Every numeric field must be realistic and greater than zero where applicable. "
+            "Use the electrical devices input as the only source for generating load rows. "
+            "Every row must map directly to a device explicitly mentioned in the electrical devices input. "
+            "Do not create new devices based only on lifestyle context. "
+            "Do not merge lifestyle context into source_text. "
+            "source_text must only reference the electrical devices input. "
+            "source_text must be an exact substring or direct extract from the electrical devices input. "
+            "Do not reword, summarise, or interpret source_text. "
+            "Preserve the original wording in source_text as much as possible. "
+            "The name field can be normalised or cleaned, but source_text must remain raw. "
+            "Use the lifestyle / van use context only to adjust hours per day, adjust duty cycle, "
+            "add assumption notes, and identify uncertain_items and context_items. "
+            "If lifestyle context suggests a device that is not listed, do not add it as a row. "
+            "Instead include it in uncertain_items as a possible missing load. "
+            "If there is any conflict, always prefer the electrical devices input over lifestyle context."
         ),
         "input": (
             "Create a campervan/off-grid power audit.\n"
             "Use only the most likely daily loads mentioned or clearly implied.\n"
             "Keep rows compact and assumption notes short.\n\n"
-            f"Van size: {user_profile['van_size']}\n"
-            f"Usage: {user_profile['usage']}\n"
-            f"Adults: {user_profile['adults']}\n"
-            f"Kids: {user_profile['kids']}\n"
-            f"Loads description: {user_profile['loads_description']}\n"
+            f"{format_user_profile(user_profile)}"
         ),
         "max_output_tokens": 1800,
         "parallel_tool_calls": False,
@@ -409,7 +425,7 @@ def export_csv(devices, overall_total):
 
 def build_audit_result(user_profile):
     """Build the audit result and reuse the existing totals/export logic."""
-    prompt = build_ai_prompt(user_profile)
+    prompt = build_audit_prompt(user_profile)
     ai_result = extract_audit_with_openai(user_profile)
     rows = ai_result["rows"]
     context_items = ai_result["context_items"]
@@ -592,6 +608,12 @@ def build_page_html():
       min-height: 24px;
     }
 
+    .helper-text {
+      margin-top: 6px;
+      color: #5e5141;
+      font-size: 0.95rem;
+    }
+
     .table-actions {
       margin-top: 16px;
       display: flex;
@@ -660,8 +682,15 @@ def build_page_html():
       </div>
 
       <div>
-        <label for="loads_description">Messy Load Description</label>
-        <textarea id="loads_description" placeholder="Example: remote work, starlink, cooking, heater, camera charging"></textarea>
+        <label for="use_case_notes">How will you use the van in real life?</label>
+        <p class="helper-text">Describe the kind of trips, how often you travel, whether you stay off-grid or at campgrounds, whether you work from the van, what seasons you use it in, and anything else that affects power use.</p>
+        <textarea id="use_case_notes" placeholder="Weekend trips most months, a few longer holidays, usually 2–3 nights off-grid, some winter trips, fridge always on, mostly cook on gas, sometimes stay at campgrounds, charge phones and camera gear, and occasionally work from the van on a laptop."></textarea>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <label for="loads_description">What electrical devices will you use?</label>
+        <p class="helper-text">List the electrical items you expect to run or charge in the van. Use normal language. Include anything regular or occasional, even if you are unsure of the wattage.</p>
+        <textarea id="loads_description" placeholder="12V fridge, diesel heater fan, roof fan, LED lights, 2 phones, laptop, camera battery charger, drone batteries, water pump, electric blanket, induction hob used occasionally."></textarea>
       </div>
 
       <div style="margin-top: 16px;">
@@ -694,16 +723,36 @@ def build_page_html():
   </div>
 
   <script>
-    const button = document.getElementById("generate_button");
+    const generateButton = document.getElementById("generate_button");
     const results = document.getElementById("results");
     const statusBox = document.getElementById("status");
     const promptBox = document.getElementById("prompt_box");
     const rawResponseBox = document.getElementById("raw_response_box");
     const tableContainer = document.getElementById("table_container");
     const totalsBox = document.getElementById("totals");
-    const uncertainContainer = document.getElementById("uncertain_container");
+    const reviewItemsContainer = document.getElementById("uncertain_container");
     const recalculateButton = document.getElementById("recalculate_button");
     const inverterEfficiency = 0.9;
+    let generateTimerId = null;
+
+    function formatElapsedSeconds(startTime) {
+      return ((performance.now() - startTime) / 1000).toFixed(1);
+    }
+
+    function clearGenerateTimer() {
+      if (generateTimerId !== null) {
+        clearInterval(generateTimerId);
+        generateTimerId = null;
+      }
+    }
+
+    function startGenerateTimer(startTime) {
+      clearGenerateTimer();
+      statusBox.textContent = `Generating audit... ${formatElapsedSeconds(startTime)}s`;
+      generateTimerId = window.setInterval(() => {
+        statusBox.textContent = `Generating audit... ${formatElapsedSeconds(startTime)}s`;
+      }, 100);
+    }
 
     function escapeHtml(value) {
       return String(value)
@@ -775,11 +824,11 @@ def build_page_html():
       }
 
       if (sections.length === 0) {
-        uncertainContainer.innerHTML = "<p>No review items right now.</p>";
+        reviewItemsContainer.innerHTML = "<p>No review items right now.</p>";
         return;
       }
 
-      uncertainContainer.innerHTML = sections.join("");
+      reviewItemsContainer.innerHTML = sections.join("");
     }
 
     function toNumber(value, fallback = 0) {
@@ -864,13 +913,15 @@ def build_page_html():
     }
 
     async function generateAudit() {
-      statusBox.textContent = "Generating audit...";
+      const startTime = performance.now();
+      startGenerateTimer(startTime);
 
       const payload = {
         van_size: document.getElementById("van_size").value,
         usage: document.getElementById("usage").value,
         adults: Number(document.getElementById("adults").value || 0),
         kids: Number(document.getElementById("kids").value || 0),
+        use_case_notes: document.getElementById("use_case_notes").value,
         loads_description: document.getElementById("loads_description").value
       };
 
@@ -881,13 +932,19 @@ def build_page_html():
       });
 
       if (!response.ok) {
+        clearGenerateTimer();
         const errorResult = await response.json();
-        statusBox.textContent = errorResult.error || "OpenAI request failed.";
+        const elapsed = formatElapsedSeconds(startTime);
+        statusBox.textContent = errorResult.error
+          ? `Audit failed after ${elapsed}s: ${errorResult.error}`
+          : `Audit failed after ${elapsed}s`;
         rawResponseBox.textContent = errorResult.raw_ai_response || "";
         results.classList.add("visible");
         return;
       }
 
+      clearGenerateTimer();
+      const elapsed = formatElapsedSeconds(startTime);
       const result = await response.json();
       promptBox.textContent = result.prompt;
       rawResponseBox.textContent = result.raw_ai_response || "";
@@ -895,10 +952,10 @@ def build_page_html():
       renderTotals(result.totals);
       renderReviewItems(result.context_items, result.uncertain_items, result.excluded_items);
       results.classList.add("visible");
-      statusBox.textContent = "Draft audit generated. The table below is editable in the browser.";
+      statusBox.textContent = `Draft audit generated in ${elapsed}s`;
     }
 
-    button.addEventListener("click", generateAudit);
+    generateButton.addEventListener("click", generateAudit);
 
     recalculateButton.addEventListener("click", () => {
       const rows = readRowsFromTable();
@@ -925,15 +982,7 @@ if FastAPI is not None:
     async def generate(request: Request):
         try:
             payload = await request.json()
-
-            user_profile = {
-                "van_size": payload.get("van_size", "medium"),
-                "usage": payload.get("usage", "weekend"),
-                "adults": payload.get("adults", 2),
-                "kids": payload.get("kids", 0),
-                "loads_description": payload.get("loads_description", ""),
-            }
-
+            user_profile = build_user_profile(payload)
             result = build_audit_result(user_profile)
             return JSONResponse(result)
         except Exception as e:

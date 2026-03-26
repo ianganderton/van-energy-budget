@@ -1,11 +1,14 @@
 Device,Category,Quantity,Include,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh,Assumption Note
-Fridge Freezer,Appliance,1.0,True,12v,45.0,24.0,0.5,540.0,Typical fridge freezer power usage in campervan
-iPads Charging,Devices,4.0,True,ac,12.0,3.0,1.0,144.0,Standard tablet charger power
-TV,Entertainment,1.0,True,ac,60.0,4.0,1.0,240.0,Medium size LED TV typical usage
-Coffee Machine,Appliance,1.0,True,ac,1000.0,0.25,1.0,250.0,Most coffee machines ~1000W
-Microwave,Appliance,1.0,True,ac,1000.0,0.25,0.5,125.0,Microwave typical power and usage
-Lights,Lighting,10.0,True,12v,5.0,5.0,1.0,250.0,LED lighting typical wattage
-Fans,Appliance,2.0,True,12v,10.0,8.0,1.0,160.0,Low power 12V fans
-Starlink,Electronics,1.0,True,ac,100.0,6.0,1.0,600.0,Starlink typical power usage
+12V fridge,appliance,1.0,True,12v,40.0,24.0,0.5,480.0,Fridge always on for off-grid stays
+Diesel heater fan,heating,1.0,True,12v,80.0,6.0,0.7,336.0,Used mainly during some winter trips
+Roof fan,ventilation,1.0,True,12v,15.0,8.0,0.5,60.0,Used for ventilation during stays
+LED lights,lighting,6.0,True,12v,3.0,4.0,1.0,72.0,Multiple LED lights used in evenings
+Phones,electronics,2.0,True,ac,10.0,3.0,1.0,60.0,Charging phones daily
+Laptop,electronics,1.0,True,ac,50.0,4.0,0.75,150.0,Occasional work from van
+Camera battery charger,electronics,1.0,True,ac,12.0,1.0,1.0,12.0,Charging camera gear
+Drone batteries charger,electronics,1.0,True,ac,15.0,1.0,0.5,7.5,Occasional charging
+Water pump,water system,1.0,True,12v,50.0,0.5,1.0,25.0,Used for water supply
+Electric blanket,heating,1.0,True,12v,60.0,3.0,0.7,126.0,Used occasionally in cold nights
+Induction hob,cooking,1.0,True,ac,1500.0,0.5,0.3,225.0,Used occasionally for cooking
 
-Total,,,,,,,,2460.0,
+Total,,,,,,,,1604.0,
