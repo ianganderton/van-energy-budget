@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import time
 import traceback
 
 try:
@@ -20,8 +21,17 @@ except ImportError:
 
 INVERTER_EFFICIENCY = 0.9
 CSV_FILE = "power_audit.csv"
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
 OPENAI_FALLBACK_MODEL = "gpt-4.1-mini"
+
+
+def log_timing(stage, start_time, **details):
+    """Print a simple elapsed-time log line for request instrumentation."""
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+    detail_parts = [f"{key}={value}" for key, value in details.items()]
+    detail_text = f" | {' '.join(detail_parts)}" if detail_parts else ""
+    print(f"TIMING: {stage} | elapsed_ms={elapsed_ms:.1f}{detail_text}")
 
 
 def format_user_profile(user_profile):
@@ -40,24 +50,40 @@ def build_audit_prompt(user_profile):
     """Turn the user profile into a readable prompt string for the UI."""
     return (
         "Create a campervan/off-grid power audit.\n"
-        f"{format_user_profile(user_profile)}"
-        "Use the electrical devices field as the only source for generating load rows.\n"
-        "Every row must map directly to a device explicitly mentioned in the electrical devices field.\n"
-        "Do not create new devices based only on lifestyle context.\n"
-        "Do not merge lifestyle context into source_text.\n"
-        "source_text must only reference the electrical devices field.\n"
-        "source_text must be an exact substring or direct extract from the electrical devices field.\n"
-        "Do not reword, summarise, or interpret source_text.\n"
-        "Preserve the original wording in source_text as much as possible.\n"
-        "The name field can be normalised or cleaned, but source_text must remain raw.\n"
-        "Use the lifestyle / van use context only to adjust hours per day, adjust duty cycle, "
-        "add assumption notes, and identify uncertain_items and context_items.\n"
-        "If lifestyle context suggests a device that is not listed, do not add it as a row. "
-        "Instead include it in uncertain_items as a possible missing load.\n"
-        "If there is any conflict, always prefer the electrical devices field over lifestyle context.\n"
-        "Return a practical list of daily electrical loads with quantity, category, "
-        "voltage type, watts, hours per day, duty cycle, source text, confidence, "
-        "and assumption notes as valid JSON only."
+        "\nInputs:\n"
+        f"- Van size: {user_profile['van_size']}\n"
+        f"- Usage: {user_profile['usage']}\n"
+        f"- Adults: {user_profile['adults']}\n"
+        f"- Kids: {user_profile['kids']}\n"
+        f"- Lifestyle context: {user_profile['use_case_notes']}\n"
+        f"- Electrical devices: {user_profile['loads_description']}\n"
+        "\nRules:\n"
+        "- Build rows only from devices explicitly mentioned in Electrical devices\n"
+        "- Every row must map directly to a device explicitly mentioned in Electrical devices\n"
+        "- Never create rows from Lifestyle context alone\n"
+        "- Lifestyle context may only affect hours, duty, assumption_note, and review_items\n"
+        "- If Lifestyle context suggests a device that is not listed, do not add it as a row; add it only to review_items\n"
+        "- If inputs conflict, prefer Electrical devices\n"
+        "- source_text must come only from Electrical devices\n"
+        "- source_text must be a raw exact extract from Electrical devices\n"
+        "- Do not reword, summarise, or interpret source_text\n"
+        "- name may be cleaned, but source_text must stay raw\n"
+        "- If a device is ambiguous, keep the user's wording as the row basis rather than converting it into a different device type\n"
+        "\nReturn valid JSON only with:\n"
+        "- rows: name, category, quantity, include, voltage, watts, hours, duty, daily_wh, source_text, confidence, assumption_note\n"
+        "- review_items: type, text, note"
+    )
+
+
+def build_openai_input(user_profile):
+    """Build the compact input block sent to the OpenAI API."""
+    return (
+        f"Van size: {user_profile['van_size']}\n"
+        f"Usage: {user_profile['usage']}\n"
+        f"Adults: {user_profile['adults']}\n"
+        f"Kids: {user_profile['kids']}\n"
+        f"Lifestyle context: {user_profile['use_case_notes']}\n"
+        f"Electrical devices: {user_profile['loads_description']}"
     )
 
 
@@ -121,44 +147,21 @@ def get_audit_schema():
                     "additionalProperties": False,
                 },
             },
-            "context_items": {
+            "review_items": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
+                        "type": {"type": "string"},
                         "text": {"type": "string"},
                         "note": {"type": "string"},
                     },
-                    "required": ["text", "note"],
-                    "additionalProperties": False,
-                },
-            },
-            "uncertain_items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "note": {"type": "string"},
-                    },
-                    "required": ["text", "note"],
-                    "additionalProperties": False,
-                },
-            },
-            "excluded_items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["text", "reason"],
+                    "required": ["type", "text", "note"],
                     "additionalProperties": False,
                 },
             },
         },
-        "required": ["rows", "context_items", "uncertain_items", "excluded_items"],
+        "required": ["rows", "review_items"],
         "additionalProperties": False,
     }
 
@@ -232,11 +235,47 @@ def normalize_ai_result(ai_result):
         normalized_row["daily_wh"] = round(recalculated_daily_wh, 2)
         normalized_rows.append(normalized_row)
 
+    normalized_review_items = []
+
+    for item in ai_result.get("review_items", []):
+        normalized_review_items.append(
+            {
+                "type": str(item.get("type", "")).strip() or "review",
+                "text": str(item.get("text", "")).strip(),
+                "note": str(item.get("note", "")).strip(),
+            }
+        )
+
+    for item in ai_result.get("context_items", []):
+        normalized_review_items.append(
+            {
+                "type": "context",
+                "text": str(item.get("text", "")).strip(),
+                "note": str(item.get("note", "")).strip(),
+            }
+        )
+
+    for item in ai_result.get("uncertain_items", []):
+        normalized_review_items.append(
+            {
+                "type": "uncertain",
+                "text": str(item.get("text", "")).strip(),
+                "note": str(item.get("note", "")).strip(),
+            }
+        )
+
+    for item in ai_result.get("excluded_items", []):
+        normalized_review_items.append(
+            {
+                "type": "excluded",
+                "text": str(item.get("text", "")).strip(),
+                "note": str(item.get("reason", "")).strip(),
+            }
+        )
+
     return {
         "rows": normalized_rows,
-        "context_items": ai_result.get("context_items", []),
-        "uncertain_items": ai_result.get("uncertain_items", []),
-        "excluded_items": ai_result.get("excluded_items", []),
+        "review_items": normalized_review_items,
     }
 
 
@@ -245,33 +284,24 @@ def build_openai_request(model_name, user_profile):
     request = {
         "model": model_name,
         "instructions": (
-            "You extract structured JSON data for a campervan power audit. "
-            "Return JSON only. Do not wrap it in markdown. "
-            "Keep it concise but complete. "
+            "Return valid JSON only for a campervan power audit. "
             "Prefer common campervan defaults. "
-            "Use only '12v' or 'ac' for the voltage field. "
-            "Every numeric field must be realistic and greater than zero where applicable. "
-            "Use the electrical devices input as the only source for generating load rows. "
-            "Every row must map directly to a device explicitly mentioned in the electrical devices input. "
-            "Do not create new devices based only on lifestyle context. "
-            "Do not merge lifestyle context into source_text. "
-            "source_text must only reference the electrical devices input. "
-            "source_text must be an exact substring or direct extract from the electrical devices input. "
+            "Use only '12v' or 'ac' for voltage. "
+            "Numeric fields must be realistic and greater than zero where applicable. "
+            "Build rows only from devices explicitly mentioned in Electrical devices. "
+            "Every row must map directly to a device explicitly mentioned there. "
+            "Never create rows from Lifestyle context alone. "
+            "Lifestyle context may only affect hours, duty, assumption_note, and review_items. "
+            "If Lifestyle context suggests a device that is not listed, add it only to review_items. "
+            "If inputs conflict, prefer Electrical devices. "
+            "source_text must come only from Electrical devices and must be a raw exact extract. "
             "Do not reword, summarise, or interpret source_text. "
-            "Preserve the original wording in source_text as much as possible. "
-            "The name field can be normalised or cleaned, but source_text must remain raw. "
-            "Use the lifestyle / van use context only to adjust hours per day, adjust duty cycle, "
-            "add assumption notes, and identify uncertain_items and context_items. "
-            "If lifestyle context suggests a device that is not listed, do not add it as a row. "
-            "Instead include it in uncertain_items as a possible missing load. "
-            "If there is any conflict, always prefer the electrical devices input over lifestyle context."
+            "name may be cleaned, but source_text must stay raw. "
+            "If a device is ambiguous, keep the user's wording as the row basis rather than converting it into a different device type. "
+            "Use review_items for assumptions, ambiguities, likely mistakes, missing loads, and excluded or ignored inputs. "
+            "Each review_items entry must have type, text, and note."
         ),
-        "input": (
-            "Create a campervan/off-grid power audit.\n"
-            "Use only the most likely daily loads mentioned or clearly implied.\n"
-            "Keep rows compact and assumption notes short.\n\n"
-            f"{format_user_profile(user_profile)}"
-        ),
+        "input": build_openai_input(user_profile),
         "max_output_tokens": 1800,
         "parallel_tool_calls": False,
         "text": {
@@ -292,7 +322,7 @@ def build_openai_request(model_name, user_profile):
     return request
 
 
-def extract_audit_with_openai(user_profile):
+def extract_audit_with_openai(user_profile, request_start_time=None):
     """Call OpenAI Responses API and return structured audit data."""
     if OpenAI is None:
         raise OpenAIExtractionError("The OpenAI Python SDK is not installed in this environment.")
@@ -311,7 +341,10 @@ def extract_audit_with_openai(user_profile):
     for model_name in models_to_try:
         response = None
         try:
+            openai_call_start = time.perf_counter()
+            log_timing("OpenAI API call start", request_start_time or openai_call_start, model=model_name)
             response = client.responses.create(**build_openai_request(model_name, user_profile))
+            log_timing("OpenAI API call end", request_start_time or openai_call_start, model=model_name)
         except Exception as error:
             error_text = str(error)
             if "timed out" in error_text.lower():
@@ -352,6 +385,7 @@ def extract_audit_with_openai(user_profile):
         try:
             parsed_result = json.loads(raw_text)
             normalized_result = normalize_ai_result(parsed_result)
+            log_timing("JSON parse / normalisation complete", request_start_time or openai_call_start, model=model_name)
             normalized_result["raw_response_text"] = raw_text
             return normalized_result
         except json.JSONDecodeError as error:
@@ -423,25 +457,31 @@ def export_csv(devices, overall_total):
         writer.writerow(["Total", "", "", "", "", "", "", "", overall_total, ""])
 
 
-def build_audit_result(user_profile):
+def build_audit_result(user_profile, request_start_time=None):
     """Build the audit result and reuse the existing totals/export logic."""
+    request_start = request_start_time or time.perf_counter()
     prompt = build_audit_prompt(user_profile)
-    ai_result = extract_audit_with_openai(user_profile)
+    openai_input = build_openai_input(user_profile)
+    log_timing(
+        "prompt build complete",
+        request_start,
+        model=OPENAI_MODEL,
+        prompt_length_chars=len(prompt),
+        api_input_length_chars=len(openai_input),
+    )
+    ai_result = extract_audit_with_openai(user_profile, request_start_time=request_start)
     rows = ai_result["rows"]
-    context_items = ai_result["context_items"]
-    uncertain_items = ai_result["uncertain_items"]
-    excluded_items = ai_result["excluded_items"]
+    review_items = ai_result["review_items"]
     included_rows = [row for row in rows if row.get("include", True)]
     dc_total, ac_total, overall_total = calculate_totals(included_rows)
+    log_timing("totals calculation complete", request_start)
     export_csv(rows, overall_total)
 
     return {
         "prompt": prompt,
         "raw_ai_response": ai_result["raw_response_text"],
         "rows": rows,
-        "context_items": context_items,
-        "uncertain_items": uncertain_items,
-        "excluded_items": excluded_items,
+        "review_items": review_items,
         "totals": {
             "dc_total": round(dc_total, 2),
             "ac_total": round(ac_total, 2),
@@ -684,13 +724,15 @@ def build_page_html():
       <div>
         <label for="use_case_notes">How will you use the van in real life?</label>
         <p class="helper-text">Describe the kind of trips, how often you travel, whether you stay off-grid or at campgrounds, whether you work from the van, what seasons you use it in, and anything else that affects power use.</p>
-        <textarea id="use_case_notes" placeholder="Weekend trips most months, a few longer holidays, usually 2–3 nights off-grid, some winter trips, fridge always on, mostly cook on gas, sometimes stay at campgrounds, charge phones and camera gear, and occasionally work from the van on a laptop."></textarea>
+        <!-- TEMP TEST DATA - REMOVE LATER -->
+        <textarea id="use_case_notes" placeholder="Weekend trips most months, a few longer holidays, usually 2–3 nights off-grid, some winter trips, fridge always on, mostly cook on gas, sometimes stay at campgrounds, charge phones and camera gear, and occasionally work from the van on a laptop.">Weekend trips most months, a few longer holidays, usually 2–3 nights off-grid, some winter trips, fridge always on, mostly cook on gas, sometimes stay at campgrounds, charge phones and camera gear, and occasionally work from the van on a laptop.</textarea>
       </div>
 
       <div style="margin-top: 16px;">
         <label for="loads_description">What electrical devices will you use?</label>
         <p class="helper-text">List the electrical items you expect to run or charge in the van. Use normal language. Include anything regular or occasional, even if you are unsure of the wattage.</p>
-        <textarea id="loads_description" placeholder="12V fridge, diesel heater fan, roof fan, LED lights, 2 phones, laptop, camera battery charger, drone batteries, water pump, electric blanket, induction hob used occasionally."></textarea>
+        <!-- TEMP TEST DATA - REMOVE LATER -->
+        <textarea id="loads_description" placeholder="12V fridge, diesel heater fan, roof fan, LED lights, 2 phones, laptop, camera battery charger, drone batteries, water pump, electric blanket, induction hob used occasionally.">12V fridge, diesel heater fan, roof fan, LED lights, 2 phones, laptop, camera battery charger, drone batteries, water pump, electric blanket, induction hob used occasionally.</textarea>
       </div>
 
       <div style="margin-top: 16px;">
@@ -799,36 +841,17 @@ def build_page_html():
       tableContainer.innerHTML = `<table>${header}${body}</table>`;
     }
 
-    function renderReviewItems(contextItems, uncertainItems, excludedItems) {
-      const sections = [];
-
-      if (contextItems && contextItems.length > 0) {
-        const html = contextItems.map((item) => `
-          <li><strong>${escapeHtml(item.text)}</strong> - ${escapeHtml(item.note)}</li>
-        `).join("");
-        sections.push(`<h3>Context Items</h3><ul class="review-list">${html}</ul>`);
-      }
-
-      if (uncertainItems && uncertainItems.length > 0) {
-        const html = uncertainItems.map((item) => `
-          <li><strong>${escapeHtml(item.text)}</strong> - ${escapeHtml(item.note)}</li>
-        `).join("");
-        sections.push(`<h3>Uncertain Items</h3><ul class="review-list">${html}</ul>`);
-      }
-
-      if (excludedItems && excludedItems.length > 0) {
-        const html = excludedItems.map((item) => `
-          <li><strong>${escapeHtml(item.text)}</strong> - ${escapeHtml(item.reason)}</li>
-        `).join("");
-        sections.push(`<h3>Excluded Items</h3><ul class="review-list">${html}</ul>`);
-      }
-
-      if (sections.length === 0) {
+    function renderReviewItems(reviewItems) {
+      if (!reviewItems || reviewItems.length === 0) {
         reviewItemsContainer.innerHTML = "<p>No review items right now.</p>";
         return;
       }
 
-      reviewItemsContainer.innerHTML = sections.join("");
+      const html = reviewItems.map((item) => `
+        <li><strong>${escapeHtml(item.type || "review")}</strong>: <strong>${escapeHtml(item.text)}</strong> - ${escapeHtml(item.note)}</li>
+      `).join("");
+
+      reviewItemsContainer.innerHTML = `<ul class="review-list">${html}</ul>`;
     }
 
     function toNumber(value, fallback = 0) {
@@ -950,7 +973,7 @@ def build_page_html():
       rawResponseBox.textContent = result.raw_ai_response || "";
       renderTable(result.rows);
       renderTotals(result.totals);
-      renderReviewItems(result.context_items, result.uncertain_items, result.excluded_items);
+      renderReviewItems(result.review_items);
       results.classList.add("visible");
       statusBox.textContent = `Draft audit generated in ${elapsed}s`;
     }
@@ -980,13 +1003,19 @@ if FastAPI is not None:
 
     @app.post("/generate")
     async def generate(request: Request):
+        request_start = time.perf_counter()
+        log_timing("request received", request_start)
         try:
             payload = await request.json()
             user_profile = build_user_profile(payload)
-            result = build_audit_result(user_profile)
+            result = build_audit_result(user_profile, request_start_time=request_start)
+            log_timing("response ready", request_start, total_duration_ms=f"{(time.perf_counter() - request_start) * 1000:.1f}")
+            log_timing("total request duration", request_start)
             return JSONResponse(result)
         except Exception as e:
             print("OPENAI ERROR:", e)
+            log_timing("response ready", request_start, total_duration_ms=f"{(time.perf_counter() - request_start) * 1000:.1f}", status="error")
+            log_timing("total request duration", request_start, status="error")
             traceback.print_exc()
             return JSONResponse(
                 {

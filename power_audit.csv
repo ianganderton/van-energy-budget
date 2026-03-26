@@ -1,14 +1,14 @@
 Device,Category,Quantity,Include,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh,Assumption Note
-12V fridge,appliance,1.0,True,12v,40.0,24.0,0.5,480.0,Fridge always on for off-grid stays
-Diesel heater fan,heating,1.0,True,12v,80.0,6.0,0.7,336.0,Used mainly during some winter trips
-Roof fan,ventilation,1.0,True,12v,15.0,8.0,0.5,60.0,Used for ventilation during stays
-LED lights,lighting,6.0,True,12v,3.0,4.0,1.0,72.0,Multiple LED lights used in evenings
-Phones,electronics,2.0,True,ac,10.0,3.0,1.0,60.0,Charging phones daily
-Laptop,electronics,1.0,True,ac,50.0,4.0,0.75,150.0,Occasional work from van
-Camera battery charger,electronics,1.0,True,ac,12.0,1.0,1.0,12.0,Charging camera gear
-Drone batteries charger,electronics,1.0,True,ac,15.0,1.0,0.5,7.5,Occasional charging
-Water pump,water system,1.0,True,12v,50.0,0.5,1.0,25.0,Used for water supply
-Electric blanket,heating,1.0,True,12v,60.0,3.0,0.7,126.0,Used occasionally in cold nights
-Induction hob,cooking,1.0,True,ac,1500.0,0.5,0.3,225.0,Used occasionally for cooking
+12V fridge,Refrigeration,1.0,True,12v,45.0,24.0,0.5,540.0,"Assumed 45W average power, running half the time each day."
+diesel heater fan,Heating,1.0,True,12v,60.0,8.0,1.0,480.0,Assumed 8 hours usage on winter trips.
+roof fan,Ventilation,1.0,True,12v,15.0,8.0,1.0,120.0,"Used during ventilation periods, estimated 8 hours."
+LED lights,Lighting,6.0,True,12v,3.0,5.0,0.8,72.0,"Typical 3W LEDs, 6 lights used 5 hours a day."
+phones,Charging,2.0,True,12v,5.0,2.0,1.0,20.0,"Each phone approx 5W charging, 2 hours daily."
+laptop,Charging,1.0,True,ac,60.0,3.0,1.0,180.0,"Used occasionally for work, 3 hours daily during weekend trips."
+camera battery charger,Charging,1.0,True,ac,10.0,2.0,1.0,20.0,Charging during the day for 2 hours.
+drone batteries,Charging,1.0,True,ac,30.0,1.0,0.5,15.0,Used occasionally; assumed half of the days.
+water pump,Water Systems,1.0,True,12v,40.0,0.5,1.0,20.0,Short runs totalling 30 minutes daily.
+electric blanket,Heating,1.0,True,12v,40.0,4.0,1.0,160.0,Used during winter trips for up to 4 hours.
+induction hob,Cooking,1.0,True,ac,1400.0,0.5,0.25,175.0,"Used occasionally, assumed 30 minutes on 1 out of 4 days."
 
-Total,,,,,,,,1604.0,
+Total,,,,,,,,1845.3333333333333,
