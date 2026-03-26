@@ -1,3 +1,6 @@
 Device,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh
+fridge,12v,45,24,0.4,432.0
+laptop,ac,60,2,1.0,120.0
+fan,12v,20,5,0.7,70.0
 
-Total,,,,,0
+Total,,,,,635.3333333333334
