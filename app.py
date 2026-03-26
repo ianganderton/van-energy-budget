@@ -507,6 +507,9 @@ def build_page_html():
       --text: #2e2418;
       --accent: #1f6f5f;
       --accent-soft: #d8ece6;
+      --solar-accent: #f59e0b;
+      --error-bg: #fef2f2;
+      --error-text: #7f1d1d;
     }
 
     * { box-sizing: border-box; }
@@ -548,6 +551,7 @@ def build_page_html():
       border-radius: 18px;
       padding: 20px;
       box-shadow: 0 16px 40px rgba(46, 36, 24, 0.08);
+      margin-top: 24px;
     }
 
     .form-grid {
@@ -680,6 +684,55 @@ def build_page_html():
       overflow-x: auto;
       margin-bottom: 18px;
     }
+
+    .solar-error {
+      border: 1px solid rgba(220, 38, 38, 0.25);
+      background: var(--error-bg);
+      padding: 12px;
+      border-radius: 14px;
+      color: var(--error-text);
+      margin-bottom: 16px;
+    }
+
+    .solar-meta {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      font-size: 14px;
+      color: #5e5141;
+    }
+
+    .chart-wrap {
+      height: 420px;
+      margin-top: 12px;
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 8px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .solar-table-wrap {
+      overflow-x: auto;
+      margin-top: 16px;
+    }
+
+    .solar-table {
+      min-width: 980px;
+    }
+
+    .solar-table th:first-child,
+    .solar-table td:first-child {
+      font-weight: 700;
+      min-width: 140px;
+      background: #f7f1e5;
+    }
   </style>
 </head>
 <body>
@@ -691,6 +744,11 @@ def build_page_html():
 
     <div class="panel">
       <div class="form-grid">
+        <div>
+          <label for="location">Location</label>
+          <input id="location" type="text" value="Rotorua, New Zealand" placeholder="e.g. Rotorua, New Zealand">
+        </div>
+
         <div>
           <label for="van_size">Van Size</label>
           <select id="van_size">
@@ -736,13 +794,42 @@ def build_page_html():
       </div>
 
       <div style="margin-top: 16px;">
-        <button id="generate_button" type="button">Generate Audit</button>
+        <button id="generate_button" type="button">Generate Solar + Audit</button>
       </div>
 
       <div id="status" class="status"></div>
     </div>
 
     <div id="results" class="results">
+      <div class="panel">
+        <h2>Solar Audit</h2>
+        <div id="solar_error" class="solar-error" style="display:none"></div>
+        <div id="solar_results" style="display:none">
+          <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+            <div>
+              <div style="font-weight:900;font-size:18px">Average daily solar hours by month</div>
+              <div id="solar_name" style="font-size:13px;margin-top:4px;color:#5e5141">—</div>
+            </div>
+            <div id="solar_source" style="font-size:12px;color:#5e5141">—</div>
+          </div>
+
+          <div class="solar-meta">
+            <div>Latitude: <span id="solar_lat">—</span></div>
+            <div>Longitude: <span id="solar_lon">—</span></div>
+          </div>
+
+          <div class="chart-wrap">
+            <canvas id="solar_chart" width="1200" height="700"></canvas>
+          </div>
+
+          <div class="solar-table-wrap">
+            <table class="solar-table">
+              <tbody id="solar_tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div class="panel">
         <h2>AI Prompt</h2>
         <div id="prompt_box" class="prompt-box"></div>
@@ -765,6 +852,8 @@ def build_page_html():
   </div>
 
   <script>
+    const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const NASA_KEYS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
     const generateButton = document.getElementById("generate_button");
     const results = document.getElementById("results");
     const statusBox = document.getElementById("status");
@@ -774,6 +863,15 @@ def build_page_html():
     const totalsBox = document.getElementById("totals");
     const reviewItemsContainer = document.getElementById("uncertain_container");
     const recalculateButton = document.getElementById("recalculate_button");
+    const solarErrorBox = document.getElementById("solar_error");
+    const solarResults = document.getElementById("solar_results");
+    const solarName = document.getElementById("solar_name");
+    const solarLat = document.getElementById("solar_lat");
+    const solarLon = document.getElementById("solar_lon");
+    const solarSource = document.getElementById("solar_source");
+    const solarTableBody = document.getElementById("solar_tbody");
+    const solarCanvas = document.getElementById("solar_chart");
+    const solarCtx = solarCanvas.getContext("2d");
     const inverterEfficiency = 0.9;
     let generateTimerId = null;
 
@@ -790,9 +888,9 @@ def build_page_html():
 
     function startGenerateTimer(startTime) {
       clearGenerateTimer();
-      statusBox.textContent = `Generating audit... ${formatElapsedSeconds(startTime)}s`;
+      statusBox.textContent = `Generating solar data and audit... ${formatElapsedSeconds(startTime)}s`;
       generateTimerId = window.setInterval(() => {
-        statusBox.textContent = `Generating audit... ${formatElapsedSeconds(startTime)}s`;
+        statusBox.textContent = `Generating solar data and audit... ${formatElapsedSeconds(startTime)}s`;
       }, 100);
     }
 
@@ -852,6 +950,198 @@ def build_page_html():
       `).join("");
 
       reviewItemsContainer.innerHTML = `<ul class="review-list">${html}</ul>`;
+    }
+
+    function round(value, decimals = 2) {
+      return Number.isFinite(+value)
+        ? Math.round(+value * Math.pow(10, decimals)) / Math.pow(10, decimals)
+        : null;
+    }
+
+    function clearSolarError() {
+      solarErrorBox.style.display = "none";
+      solarErrorBox.textContent = "";
+    }
+
+    function showSolarError(message) {
+      solarErrorBox.style.display = "block";
+      solarErrorBox.textContent = message;
+    }
+
+    async function geocode(query) {
+      const url =
+        "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=" +
+        encodeURIComponent(query);
+
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) {
+        throw new Error("Location lookup failed.");
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data) || !data.length) {
+        throw new Error("No matching location found.");
+      }
+
+      return data[0];
+    }
+
+    async function fetchNasaSolar(lat, lon) {
+      const url = [
+        "https://power.larc.nasa.gov/api/temporal/climatology/point",
+        "?parameters=ALLSKY_SFC_SW_DWN",
+        "&community=RE",
+        "&format=JSON",
+        "&latitude=" + encodeURIComponent(lat),
+        "&longitude=" + encodeURIComponent(lon),
+      ].join("");
+
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) {
+        throw new Error("Solar data request failed.");
+      }
+
+      const data = await response.json();
+      const param = data?.properties?.parameter?.ALLSKY_SFC_SW_DWN;
+      if (!param) {
+        throw new Error("Solar data returned in an unexpected format.");
+      }
+
+      return { data, param };
+    }
+
+    function buildSolarRows(param) {
+      return NASA_KEYS.map((key, index) => {
+        const value = Number(param[key]);
+        return {
+          month: MONTHS[index],
+          solarHours: Number.isFinite(value) ? round(value, 2) : null
+        };
+      });
+    }
+
+    function renderSolarTable(rows) {
+      const monthCells = rows.map((row) => `<th>${row.month}</th>`).join("");
+      const valueCells = rows.map((row) => `<td>${row.solarHours ?? "—"}${row.solarHours == null ? "" : " h/day"}</td>`).join("");
+
+      solarTableBody.innerHTML = `
+        <tr>
+          <th>Month</th>
+          ${monthCells}
+        </tr>
+        <tr>
+          <td>Solar hours</td>
+          ${valueCells}
+        </tr>
+      `;
+    }
+
+    function drawSolarChart(rows, displayLocation) {
+      const width = solarCanvas.width;
+      const height = solarCanvas.height;
+
+      solarCtx.clearRect(0, 0, width, height);
+      solarCtx.fillStyle = "#fff";
+      solarCtx.fillRect(0, 0, width, height);
+
+      solarCtx.fillStyle = "#0f172a";
+      solarCtx.font = "bold 22px system-ui";
+      solarCtx.textAlign = "left";
+      solarCtx.textBaseline = "top";
+      solarCtx.fillText("Average Daily Solar Hours", 24, 20);
+
+      solarCtx.fillStyle = "#475569";
+      solarCtx.font = "14px system-ui";
+      solarCtx.fillText(displayLocation, 24, 50);
+
+      const pad = { l: 90, r: 26, t: 85, b: 90 };
+      const plotWidth = width - pad.l - pad.r;
+      const plotHeight = height - pad.t - pad.b;
+      const values = rows.map((row) => (typeof row.solarHours === "number" ? row.solarHours : 0));
+      const maxValue = Math.max(1, ...values);
+      const yMax = Math.max(1, Math.ceil(maxValue * 1.1));
+
+      solarCtx.strokeStyle = "#e2e8f0";
+      solarCtx.lineWidth = 1;
+      solarCtx.fillStyle = "#64748b";
+      solarCtx.font = "14px system-ui";
+
+      for (let i = 0; i <= 5; i += 1) {
+        const t = i / 5;
+        const y = pad.t + plotHeight - (t * plotHeight);
+
+        solarCtx.beginPath();
+        solarCtx.moveTo(pad.l, y);
+        solarCtx.lineTo(pad.l + plotWidth, y);
+        solarCtx.stroke();
+
+        solarCtx.textAlign = "right";
+        solarCtx.textBaseline = "middle";
+        solarCtx.fillText(round(t * yMax, 1) + " h", pad.l - 10, y);
+      }
+
+      solarCtx.strokeStyle = "#cbd5e1";
+      solarCtx.lineWidth = 2;
+      solarCtx.beginPath();
+      solarCtx.moveTo(pad.l, pad.t);
+      solarCtx.lineTo(pad.l, pad.t + plotHeight);
+      solarCtx.lineTo(pad.l + plotWidth, pad.t + plotHeight);
+      solarCtx.stroke();
+
+      const gap = 10;
+      const barWidth = (plotWidth - gap * (rows.length - 1)) / rows.length;
+
+      for (let i = 0; i < rows.length; i += 1) {
+        const value = typeof rows[i].solarHours === "number" ? rows[i].solarHours : 0;
+        const barHeight = (value / yMax) * plotHeight;
+        const x = pad.l + i * (barWidth + gap);
+        const y = pad.t + plotHeight - barHeight;
+        const radius = Math.min(10, barWidth / 2, barHeight / 2);
+
+        solarCtx.fillStyle = "#f59e0b";
+        solarCtx.beginPath();
+        solarCtx.moveTo(x + radius, y);
+        solarCtx.arcTo(x + barWidth, y, x + barWidth, y + barHeight, radius);
+        solarCtx.arcTo(x + barWidth, y + barHeight, x, y + barHeight, radius);
+        solarCtx.arcTo(x, y + barHeight, x, y, radius);
+        solarCtx.arcTo(x, y, x + barWidth, y, radius);
+        solarCtx.closePath();
+        solarCtx.fill();
+
+        solarCtx.fillStyle = "#0f172a";
+        solarCtx.font = "14px system-ui";
+        solarCtx.textAlign = "center";
+        solarCtx.textBaseline = "top";
+        solarCtx.fillText(rows[i].month, x + barWidth / 2, pad.t + plotHeight + 12);
+
+        solarCtx.fillStyle = "#334155";
+        solarCtx.font = "12px system-ui";
+        solarCtx.textBaseline = "bottom";
+        solarCtx.fillText(value ? String(value) : "0", x + barWidth / 2, y - 6);
+      }
+    }
+
+    async function loadSolarData(locationValue) {
+      clearSolarError();
+      solarResults.style.display = "none";
+
+      const place = await geocode(locationValue);
+      const lat = +place.lat;
+      const lon = +place.lon;
+      const { data, param } = await fetchNasaSolar(lat, lon);
+      const rows = buildSolarRows(param);
+      const displayName = place.display_name || locationValue;
+
+      solarName.textContent = displayName;
+      solarLat.textContent = round(lat, 4);
+      solarLon.textContent = round(lon, 4);
+      solarSource.textContent = data?.properties?.sources?.length
+        ? ("Source: " + data.properties.sources.join(", "))
+        : "Source: NASA POWER";
+
+      renderSolarTable(rows);
+      drawSolarChart(rows, displayName);
+      solarResults.style.display = "block";
     }
 
     function toNumber(value, fallback = 0) {
@@ -938,8 +1228,10 @@ def build_page_html():
     async function generateAudit() {
       const startTime = performance.now();
       startGenerateTimer(startTime);
+      results.classList.add("visible");
 
       const payload = {
+        location: document.getElementById("location").value,
         van_size: document.getElementById("van_size").value,
         usage: document.getElementById("usage").value,
         adults: Number(document.getElementById("adults").value || 0),
@@ -948,11 +1240,17 @@ def build_page_html():
         loads_description: document.getElementById("loads_description").value
       };
 
+      const solarPromise = loadSolarData(payload.location).catch((error) => {
+        showSolarError(error?.message || "Solar data lookup failed.");
+      });
+
       const response = await fetch("/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
+
+      await solarPromise;
 
       if (!response.ok) {
         clearGenerateTimer();
@@ -962,7 +1260,6 @@ def build_page_html():
           ? `Audit failed after ${elapsed}s: ${errorResult.error}`
           : `Audit failed after ${elapsed}s`;
         rawResponseBox.textContent = errorResult.raw_ai_response || "";
-        results.classList.add("visible");
         return;
       }
 
@@ -974,8 +1271,7 @@ def build_page_html():
       renderTable(result.rows);
       renderTotals(result.totals);
       renderReviewItems(result.review_items);
-      results.classList.add("visible");
-      statusBox.textContent = `Draft audit generated in ${elapsed}s`;
+      statusBox.textContent = `Solar data and draft audit generated in ${elapsed}s`;
     }
 
     generateButton.addEventListener("click", generateAudit);
@@ -987,6 +1283,8 @@ def build_page_html():
       renderTotals(recalculated.totals);
       statusBox.textContent = "Totals recalculated from the edited table.";
     });
+
+    drawSolarChart(MONTHS.map((month) => ({ month, solarHours: 0 })), "Selected location");
   </script>
 </body>
 </html>
