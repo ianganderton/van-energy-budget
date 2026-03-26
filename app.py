@@ -12,6 +12,15 @@ DEVICE_LIBRARY = {
     "lights": {"watts": 10, "hours": 5, "duty": 1.0, "voltage": "12v"},
 }
 
+# Friendly names that should map back to the main device keys.
+# We keep this simple: if the alias text appears inside the user's input,
+# we treat it as a match.
+DEVICE_ALIASES = {
+    "fridge": ["small fridge", "12v fridge"],
+    "fan": ["roof fan"],
+    "lights": ["led lights"],
+}
+
 INVERTER_EFFICIENCY = 0.9
 CSV_FILE = "power_audit.csv"
 
@@ -21,21 +30,36 @@ def parse_device_names(user_input):
     return [name.strip().lower() for name in user_input.split(",") if name.strip()]
 
 
+def resolve_device_name(name):
+    """Return the main device key for an exact name or a simple alias match."""
+    if name in DEVICE_LIBRARY:
+        return name
+
+    for device_key, aliases in DEVICE_ALIASES.items():
+        for alias in aliases:
+            if alias in name:
+                return device_key
+
+    return None
+
+
 def build_device_rows(device_names):
     """Turn device names into rows we can print and export."""
     devices = []
 
-    for name in device_names:
-        if name not in DEVICE_LIBRARY:
-            print(f"Unknown device: {name}")
+    for raw_name in device_names:
+        device_key = resolve_device_name(raw_name)
+
+        if device_key is None:
+            print(f"Unknown device: {raw_name}")
             continue
 
-        data = DEVICE_LIBRARY[name]
+        data = DEVICE_LIBRARY[device_key]
         daily_wh = data["watts"] * data["hours"] * data["duty"]
 
         devices.append(
             {
-                "name": name,
+                "name": device_key,
                 "voltage": data["voltage"],
                 "watts": data["watts"],
                 "hours": data["hours"],
