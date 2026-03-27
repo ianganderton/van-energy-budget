@@ -87,6 +87,18 @@ def build_openai_input(user_profile):
     )
 
 
+def get_openai_client():
+    """Create an OpenAI client after validating required environment state."""
+    if OpenAI is None:
+        raise OpenAIExtractionError("The OpenAI Python SDK is not installed in this environment.")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise OpenAIExtractionError("OPENAI_API_KEY is missing. Add it to your environment and try again.")
+
+    return OpenAI(api_key=api_key, timeout=20.0)
+
+
 def build_user_profile(payload):
     """Normalize the request payload into the shape used by the app."""
     return {
@@ -322,16 +334,37 @@ def build_openai_request(model_name, user_profile):
     return request
 
 
+def build_audit_review_input(rows, review_items, totals):
+    """Build a compact structured input for the second-pass audit review."""
+    included_rows = [row for row in rows if row.get("include", True)]
+    top_loads = sorted(included_rows, key=lambda row: row.get("daily_wh", 0), reverse=True)[:5]
+
+    return json.dumps(
+        {
+            "totals": totals,
+            "top_loads": [
+                {
+                    "name": row.get("name", ""),
+                    "voltage": row.get("voltage", ""),
+                    "daily_wh": row.get("daily_wh", 0),
+                    "watts": row.get("watts", 0),
+                    "hours": row.get("hours", 0),
+                    "duty": row.get("duty", 0),
+                    "assumption_note": row.get("assumption_note", ""),
+                }
+                for row in top_loads
+            ],
+            "review_items": review_items,
+            "load_count": len(rows),
+            "included_load_count": len(included_rows),
+        },
+        indent=2,
+    )
+
+
 def extract_audit_with_openai(user_profile, request_start_time=None):
     """Call OpenAI Responses API and return structured audit data."""
-    if OpenAI is None:
-        raise OpenAIExtractionError("The OpenAI Python SDK is not installed in this environment.")
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise OpenAIExtractionError("OPENAI_API_KEY is missing. Add it to your environment and try again.")
-
-    client = OpenAI(api_key=api_key, timeout=20.0)
+    client = get_openai_client()
     models_to_try = [OPENAI_MODEL]
     if OPENAI_FALLBACK_MODEL not in models_to_try:
         models_to_try.append(OPENAI_FALLBACK_MODEL)
@@ -401,6 +434,41 @@ def extract_audit_with_openai(user_profile, request_start_time=None):
     if last_error is not None:
         raise last_error
     raise OpenAIExtractionError("OpenAI extraction failed before a response could be parsed.")
+
+
+def generate_audit_review(rows, review_items, totals, request_start_time=None):
+    """Generate a short plain-English review from the structured audit output."""
+    client = get_openai_client()
+    review_input = build_audit_review_input(rows, review_items, totals)
+    review_start = time.perf_counter()
+    log_timing("OpenAI audit review start", request_start_time or review_start, model=OPENAI_MODEL)
+
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=(
+                "Write one short plain-English paragraph reviewing a campervan power audit. "
+                "Use only the structured audit data provided. "
+                "Mention what looks sensible or balanced. "
+                "Call out potentially problematic or inefficient loads such as resistive heating, "
+                "high-draw appliances, and small loads that run for long periods. "
+                "Mention where reducing or optimising demand may improve cost, reliability, and resilience. "
+                "Mention assumptions or ambiguous items that should be checked. "
+                "Do not create or modify loads. "
+                "Do not give exact sizing recommendations. "
+                "Do not repeat the whole table back. "
+                "Keep it concise and practical."
+            ),
+            input=review_input,
+            max_output_tokens=180,
+            parallel_tool_calls=False,
+            text={"verbosity": "medium"},
+        )
+        log_timing("OpenAI audit review end", request_start_time or review_start, model=OPENAI_MODEL)
+        return extract_response_text(response)
+    except Exception:
+        log_timing("OpenAI audit review end", request_start_time or review_start, model=OPENAI_MODEL, status="error")
+        raise
 
 
 def calculate_totals(devices):
@@ -474,19 +542,21 @@ def build_audit_result(user_profile, request_start_time=None):
     review_items = ai_result["review_items"]
     included_rows = [row for row in rows if row.get("include", True)]
     dc_total, ac_total, overall_total = calculate_totals(included_rows)
+    totals = {
+        "dc_total": round(dc_total, 2),
+        "ac_total": round(ac_total, 2),
+        "overall_total": round(overall_total, 2),
+    }
     log_timing("totals calculation complete", request_start)
+    audit_review = generate_audit_review(rows, review_items, totals, request_start_time=request_start)
+    log_timing("audit review generation complete", request_start)
     export_csv(rows, overall_total)
 
     return {
-        "prompt": prompt,
-        "raw_ai_response": ai_result["raw_response_text"],
         "rows": rows,
         "review_items": review_items,
-        "totals": {
-            "dc_total": round(dc_total, 2),
-            "ac_total": round(ac_total, 2),
-            "overall_total": round(overall_total, 2),
-        },
+        "audit_review": audit_review,
+        "totals": totals,
     }
 
 
@@ -831,12 +901,6 @@ def build_page_html():
       </div>
 
       <div class="panel">
-        <h2>AI Prompt</h2>
-        <div id="prompt_box" class="prompt-box"></div>
-
-        <h2>Raw AI Response</h2>
-        <pre id="raw_response_box" class="json-box"></pre>
-
         <h2>Draft Audit Table</h2>
         <div id="table_container"></div>
         <div class="table-actions">
@@ -847,6 +911,9 @@ def build_page_html():
 
         <h2>Review Items</h2>
         <div id="uncertain_container"></div>
+
+        <h2>Audit Review</h2>
+        <div id="audit_review_box" class="prompt-box"></div>
       </div>
     </div>
   </div>
@@ -857,11 +924,10 @@ def build_page_html():
     const generateButton = document.getElementById("generate_button");
     const results = document.getElementById("results");
     const statusBox = document.getElementById("status");
-    const promptBox = document.getElementById("prompt_box");
-    const rawResponseBox = document.getElementById("raw_response_box");
     const tableContainer = document.getElementById("table_container");
     const totalsBox = document.getElementById("totals");
     const reviewItemsContainer = document.getElementById("uncertain_container");
+    const auditReviewBox = document.getElementById("audit_review_box");
     const recalculateButton = document.getElementById("recalculate_button");
     const solarErrorBox = document.getElementById("solar_error");
     const solarResults = document.getElementById("solar_results");
@@ -952,6 +1018,10 @@ def build_page_html():
       reviewItemsContainer.innerHTML = `<ul class="review-list">${html}</ul>`;
     }
 
+    function renderAuditReview(text) {
+      auditReviewBox.textContent = text || "No audit review right now.";
+    }
+
     function round(value, decimals = 2) {
       return Number.isFinite(+value)
         ? Math.round(+value * Math.pow(10, decimals)) / Math.pow(10, decimals)
@@ -1022,7 +1092,7 @@ def build_page_html():
 
     function renderSolarTable(rows) {
       const monthCells = rows.map((row) => `<th>${row.month}</th>`).join("");
-      const valueCells = rows.map((row) => `<td>${row.solarHours ?? "—"}${row.solarHours == null ? "" : " h/day"}</td>`).join("");
+      const valueCells = rows.map((row) => `<td>${row.solarHours ?? "—"}</td>`).join("");
 
       solarTableBody.innerHTML = `
         <tr>
@@ -1274,23 +1344,19 @@ def build_page_html():
       if (!response.ok) {
         clearGenerateTimer();
         const errorResult = await response.json();
-        const elapsed = formatElapsedSeconds(startTime);
         statusBox.textContent = errorResult.error
-          ? `Audit failed after ${elapsed}s: ${errorResult.error}`
-          : `Audit failed after ${elapsed}s`;
-        rawResponseBox.textContent = errorResult.raw_ai_response || "";
+          ? `Audit failed after ${formatElapsedSeconds(startTime)}s: ${errorResult.error}`
+          : `Audit failed after ${formatElapsedSeconds(startTime)}s`;
         return;
       }
 
       clearGenerateTimer();
-      const elapsed = formatElapsedSeconds(startTime);
       const result = await response.json();
-      promptBox.textContent = result.prompt;
-      rawResponseBox.textContent = result.raw_ai_response || "";
       renderTable(result.rows);
       renderTotals(result.totals);
       renderReviewItems(result.review_items);
-      statusBox.textContent = `Solar data and draft audit generated in ${elapsed}s`;
+      renderAuditReview(result.audit_review);
+      statusBox.textContent = `Solar data and draft audit generated in ${formatElapsedSeconds(startTime)}s`;
     }
 
     generateButton.addEventListener("click", generateAudit);
