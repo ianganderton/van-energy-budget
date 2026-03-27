@@ -20,6 +20,12 @@ except ImportError:
 
 
 INVERTER_EFFICIENCY = 0.9
+SOLAR_SYSTEM_EFFICIENCY = 0.86
+DCDC_CHARGING_VOLTAGE = 14.4
+DCDC_CHARGING_EFFICIENCY = 0.9
+MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+DUTY_FRACTION_MAX = 1.0
+DUTY_PERCENT_SCALE = 100.0
 CSV_FILE = "power_audit.csv"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
@@ -69,8 +75,9 @@ def build_audit_prompt(user_profile):
         "- Do not reword, summarise, or interpret source_text\n"
         "- name may be cleaned, but source_text must stay raw\n"
         "- If a device is ambiguous, keep the user's wording as the row basis rather than converting it into a different device type\n"
+        "- duty must be returned as a percentage from 0 to 100\n"
         "\nReturn valid JSON only with:\n"
-        "- rows: name, category, quantity, include, voltage, watts, hours, duty, daily_wh, source_text, confidence, assumption_note\n"
+        "- rows: name, quantity, include, voltage, watts, hours, duty, daily_wh, source_text, confidence, assumption_note\n"
         "- review_items: type, text, note"
     )
 
@@ -130,7 +137,6 @@ def get_audit_schema():
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
-                        "category": {"type": "string"},
                         "quantity": {"type": "number"},
                         "include": {"type": "boolean"},
                         "voltage": {"type": "string"},
@@ -144,7 +150,6 @@ def get_audit_schema():
                     },
                     "required": [
                         "name",
-                        "category",
                         "quantity",
                         "include",
                         "voltage",
@@ -210,6 +215,25 @@ def serialize_response_debug(response):
         return str(response)
 
 
+def normalize_duty_percentage(raw_value):
+    """Normalize duty input into the percentage form used by the UI and Wh calculations."""
+    try:
+        duty_value = float(raw_value)
+    except (TypeError, ValueError):
+        duty_value = DUTY_PERCENT_SCALE
+
+    # Treat 0-1 inputs as fractional duty values and 1-100-style inputs as percentages.
+    if duty_value <= DUTY_FRACTION_MAX:
+        duty_value *= DUTY_PERCENT_SCALE
+
+    return max(duty_value, 0.0)
+
+
+def calculate_daily_wh(quantity, watts, hours, duty_percentage):
+    """Calculate daily Wh from UI-style duty percentage values."""
+    return quantity * watts * hours * (duty_percentage / 100.0)
+
+
 def normalize_ai_result(ai_result):
     """Normalize the structured result so the existing table and totals flow stays stable."""
     normalized_rows = []
@@ -225,27 +249,28 @@ def normalize_ai_result(ai_result):
 
         normalized_row = {
             "name": str(row.get("name", "")).strip(),
-            "category": str(row.get("category", "")).strip(),
             "quantity": float(row.get("quantity", 1)),
             "include": bool(row.get("include", True)),
             "voltage": normalized_voltage,
             "watts": float(row.get("watts", 0)),
             "hours": float(row.get("hours", 0)),
-            "duty": float(row.get("duty", 1)),
+            "duty": normalize_duty_percentage(row.get("duty", 100)),
             "daily_wh": float(row.get("daily_wh", 0)),
             "source_text": str(row.get("source_text", "")).strip(),
             "confidence": float(row.get("confidence", 0)),
             "assumption_note": str(row.get("assumption_note", "")).strip(),
         }
 
-        recalculated_daily_wh = (
-            normalized_row["quantity"]
-            * normalized_row["watts"]
-            * normalized_row["hours"]
-            * normalized_row["duty"]
+        recalculated_daily_wh = calculate_daily_wh(
+            normalized_row["quantity"],
+            normalized_row["watts"],
+            normalized_row["hours"],
+            normalized_row["duty"],
         )
         normalized_row["daily_wh"] = round(recalculated_daily_wh, 2)
         normalized_rows.append(normalized_row)
+
+    normalized_rows.sort(key=lambda row: row.get("daily_wh", 0), reverse=True)
 
     normalized_review_items = []
 
@@ -310,6 +335,7 @@ def build_openai_request(model_name, user_profile):
             "Do not reword, summarise, or interpret source_text. "
             "name may be cleaned, but source_text must stay raw. "
             "If a device is ambiguous, keep the user's wording as the row basis rather than converting it into a different device type. "
+            "duty must be a percentage from 0 to 100. "
             "Use review_items for assumptions, ambiguities, likely mistakes, missing loads, and excluded or ignored inputs. "
             "Each review_items entry must have type, text, and note."
         ),
@@ -332,34 +358,6 @@ def build_openai_request(model_name, user_profile):
         request["reasoning"] = {"effort": "low"}
 
     return request
-
-
-def build_audit_review_input(rows, review_items, totals):
-    """Build a compact structured input for the second-pass audit review."""
-    included_rows = [row for row in rows if row.get("include", True)]
-    top_loads = sorted(included_rows, key=lambda row: row.get("daily_wh", 0), reverse=True)[:5]
-
-    return json.dumps(
-        {
-            "totals": totals,
-            "top_loads": [
-                {
-                    "name": row.get("name", ""),
-                    "voltage": row.get("voltage", ""),
-                    "daily_wh": row.get("daily_wh", 0),
-                    "watts": row.get("watts", 0),
-                    "hours": row.get("hours", 0),
-                    "duty": row.get("duty", 0),
-                    "assumption_note": row.get("assumption_note", ""),
-                }
-                for row in top_loads
-            ],
-            "review_items": review_items,
-            "load_count": len(rows),
-            "included_load_count": len(included_rows),
-        },
-        indent=2,
-    )
 
 
 def extract_audit_with_openai(user_profile, request_start_time=None):
@@ -436,41 +434,6 @@ def extract_audit_with_openai(user_profile, request_start_time=None):
     raise OpenAIExtractionError("OpenAI extraction failed before a response could be parsed.")
 
 
-def generate_audit_review(rows, review_items, totals, request_start_time=None):
-    """Generate a short plain-English review from the structured audit output."""
-    client = get_openai_client()
-    review_input = build_audit_review_input(rows, review_items, totals)
-    review_start = time.perf_counter()
-    log_timing("OpenAI audit review start", request_start_time or review_start, model=OPENAI_MODEL)
-
-    try:
-        response = client.responses.create(
-            model=OPENAI_MODEL,
-            instructions=(
-                "Write one short plain-English paragraph reviewing a campervan power audit. "
-                "Use only the structured audit data provided. "
-                "Mention what looks sensible or balanced. "
-                "Call out potentially problematic or inefficient loads such as resistive heating, "
-                "high-draw appliances, and small loads that run for long periods. "
-                "Mention where reducing or optimising demand may improve cost, reliability, and resilience. "
-                "Mention assumptions or ambiguous items that should be checked. "
-                "Do not create or modify loads. "
-                "Do not give exact sizing recommendations. "
-                "Do not repeat the whole table back. "
-                "Keep it concise and practical."
-            ),
-            input=review_input,
-            max_output_tokens=180,
-            parallel_tool_calls=False,
-            text={"verbosity": "medium"},
-        )
-        log_timing("OpenAI audit review end", request_start_time or review_start, model=OPENAI_MODEL)
-        return extract_response_text(response)
-    except Exception:
-        log_timing("OpenAI audit review end", request_start_time or review_start, model=OPENAI_MODEL, status="error")
-        raise
-
-
 def calculate_totals(devices):
     """Calculate 12V, AC, and overall daily energy totals."""
     dc_total = 0
@@ -493,7 +456,6 @@ def export_csv(devices, overall_total):
         writer.writerow(
             [
                 "Device",
-                "Category",
                 "Quantity",
                 "Include",
                 "Voltage Type",
@@ -509,7 +471,6 @@ def export_csv(devices, overall_total):
             writer.writerow(
                 [
                     device["name"],
-                    device["category"],
                     device["quantity"],
                     device.get("include", True),
                     device["voltage"],
@@ -548,14 +509,11 @@ def build_audit_result(user_profile, request_start_time=None):
         "overall_total": round(overall_total, 2),
     }
     log_timing("totals calculation complete", request_start)
-    audit_review = generate_audit_review(rows, review_items, totals, request_start_time=request_start)
-    log_timing("audit review generation complete", request_start)
     export_csv(rows, overall_total)
 
     return {
         "rows": rows,
         "review_items": review_items,
-        "audit_review": audit_review,
         "totals": totals,
     }
 
@@ -673,14 +631,6 @@ def build_page_html():
       display: block;
     }
 
-    .prompt-box {
-      white-space: pre-wrap;
-      background: var(--accent-soft);
-      border-radius: 12px;
-      padding: 14px;
-      margin-bottom: 18px;
-    }
-
     table {
       width: 100%;
       border-collapse: collapse;
@@ -733,6 +683,35 @@ def build_page_html():
       display: flex;
       gap: 12px;
       flex-wrap: wrap;
+    }
+
+    .assumptions-section {
+      margin-top: 18px;
+      padding: 16px;
+      background: #f7f1e5;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+
+    .assumptions-section h2 {
+      margin: 0 0 8px;
+      font-size: 1.1rem;
+    }
+
+    .assumption-line {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+      line-height: 1.6;
+    }
+
+    .inline-input {
+      width: 96px;
+      min-width: 96px;
+      display: inline-block;
+      background: white;
     }
 
     .review-list {
@@ -802,6 +781,46 @@ def build_page_html():
       font-weight: 700;
       min-width: 140px;
       background: #f7f1e5;
+    }
+
+    .balance-helper {
+      margin-top: 4px;
+    }
+
+    .balance-chart-wrap {
+      height: 360px;
+      margin-top: 14px;
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 8px;
+    }
+
+    .footnotes-panel {
+      margin-top: 24px;
+      background: rgba(255, 250, 242, 0.75);
+      border-style: dashed;
+    }
+
+    .footnotes-panel.hidden {
+      display: none;
+    }
+
+    .footnotes-panel h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }
+
+    .footnotes-list {
+      margin: 0;
+      padding-left: 18px;
+      color: #4b4032;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    .footnotes-list li + li {
+      margin-top: 8px;
     }
   </style>
 </head>
@@ -912,23 +931,87 @@ def build_page_html():
         <h2>Review Items</h2>
         <div id="uncertain_container"></div>
 
-        <h2>Audit Review</h2>
-        <div id="audit_review_box" class="prompt-box"></div>
+        <div class="assumptions-section">
+          <h2>System Assumptions</h2>
+          <p class="helper-text">These are editable starting assumptions for the system setup.</p>
+          <div class="assumption-line">
+            <input id="solar_watts" class="inline-input" type="number" min="0" step="10">
+            <span>W solar panels</span>
+          </div>
+          <div class="assumption-line">
+            <input id="dcdc_amps" class="inline-input" type="number" min="0" step="5">
+            <span>A DC-DC with</span>
+            <input id="drive_minutes" class="inline-input" type="number" min="0" step="5">
+            <span>min driving per day</span>
+          </div>
+        </div>
+
+        <div class="assumptions-section">
+          <h2>Calculation Assumptions</h2>
+          <div class="assumption-line">
+            <span>Solar system efficiency: <strong id="solar_efficiency_display"></strong></span>
+          </div>
+          <div class="assumption-line">
+            <span>Inverter efficiency: <strong id="inverter_efficiency_display"></strong></span>
+          </div>
+          <div class="assumption-line">
+            <span>DC-DC charging voltage: <strong id="dcdc_voltage_display"></strong></span>
+          </div>
+          <div class="assumption-line">
+            <span>DC-DC charging efficiency: <strong id="dcdc_efficiency_display"></strong></span>
+          </div>
+        </div>
+
+        <h2>Monthly Energy Balance</h2>
+        <p class="helper-text balance-helper">See where your setup has spare energy and where it falls short through the year.</p>
+        <div class="balance-chart-wrap">
+          <canvas id="balance_chart" width="1200" height="600"></canvas>
+        </div>
+        <div class="solar-table-wrap">
+          <table class="solar-table">
+            <tbody id="balance_tbody"></tbody>
+          </table>
+        </div>
+
       </div>
+    </div>
+
+    <div id="footnotes_panel" class="panel footnotes-panel hidden">
+      <h2>How This Model Works</h2>
+      <ul class="footnotes-list">
+        <li>This is a decision-support tool for staging and review. It is not a full electrical design or sign-off.</li>
+        <li>The first device table is an AI-generated draft built from your plain-language inputs. The AI may estimate device names, wattage, hours of use, duty %, and whether a load is treated as 12V or AC.</li>
+        <li>The table should be reviewed and edited before trusting the totals. The results depend heavily on the values in that table.</li>
+        <li>Daily energy use comes from the device table. For each row, daily Wh is based on quantity × watts × hours × duty %.</li>
+        <li>AC loads include inverter losses, using the current inverter efficiency assumption of <strong id="footnote_inverter_efficiency"></strong>.</li>
+        <li>Solar generation uses NASA POWER data for the selected location. In the current model, the NASA value is treated as “solar hours” and then combined with your panel size and the solar system efficiency assumption of <strong id="footnote_solar_efficiency"></strong>.</li>
+        <li>DC-DC charging is estimated from charger amps, charging voltage, driving time, and charging efficiency. The current charging voltage assumption is <strong id="footnote_dcdc_voltage"></strong> and the current charging efficiency assumption is <strong id="footnote_dcdc_efficiency"></strong>.</li>
+        <li>The monthly balance compares estimated daily charging against estimated daily use across the year to show likely surplus and shortfall months.</li>
+        <li id="footnote_ai_model_line">The draft table currently uses the AI model <strong id="footnote_ai_model"></strong>.</li>
+      </ul>
     </div>
   </div>
 
   <script>
     const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
     const NASA_KEYS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+    const NASA_SOLAR_HOURS_PARAMETER = "ALLSKY_SFC_SW_DWN";
+    const openAiModel = __OPENAI_MODEL__;
     const generateButton = document.getElementById("generate_button");
     const results = document.getElementById("results");
     const statusBox = document.getElementById("status");
+    const vanSizeSelect = document.getElementById("van_size");
     const tableContainer = document.getElementById("table_container");
     const totalsBox = document.getElementById("totals");
     const reviewItemsContainer = document.getElementById("uncertain_container");
-    const auditReviewBox = document.getElementById("audit_review_box");
     const recalculateButton = document.getElementById("recalculate_button");
+    const solarWattsInput = document.getElementById("solar_watts");
+    const dcdcAmpsInput = document.getElementById("dcdc_amps");
+    const driveMinutesInput = document.getElementById("drive_minutes");
+    const solarEfficiencyDisplay = document.getElementById("solar_efficiency_display");
+    const inverterEfficiencyDisplay = document.getElementById("inverter_efficiency_display");
+    const dcdcVoltageDisplay = document.getElementById("dcdc_voltage_display");
+    const dcdcEfficiencyDisplay = document.getElementById("dcdc_efficiency_display");
     const solarErrorBox = document.getElementById("solar_error");
     const solarResults = document.getElementById("solar_results");
     const solarName = document.getElementById("solar_name");
@@ -936,10 +1019,52 @@ def build_page_html():
     const solarLon = document.getElementById("solar_lon");
     const solarSource = document.getElementById("solar_source");
     const solarTableBody = document.getElementById("solar_tbody");
+    const balanceTableBody = document.getElementById("balance_tbody");
+    const footnoteSolarEfficiency = document.getElementById("footnote_solar_efficiency");
+    const footnoteInverterEfficiency = document.getElementById("footnote_inverter_efficiency");
+    const footnoteDcdcVoltage = document.getElementById("footnote_dcdc_voltage");
+    const footnoteDcdcEfficiency = document.getElementById("footnote_dcdc_efficiency");
+    const footnoteAiModel = document.getElementById("footnote_ai_model");
+    const footnoteAiModelLine = document.getElementById("footnote_ai_model_line");
+    const footnotesPanel = document.getElementById("footnotes_panel");
     const solarCanvas = document.getElementById("solar_chart");
     const solarCtx = solarCanvas.getContext("2d");
-    const inverterEfficiency = 0.9;
+    const balanceCanvas = document.getElementById("balance_chart");
+    const balanceCtx = balanceCanvas.getContext("2d");
+    const inverterEfficiency = __INVERTER_EFFICIENCY__;
+    const solarSystemEfficiency = __SOLAR_SYSTEM_EFFICIENCY__;
+    const dcdcChargingVoltage = __DCDC_CHARGING_VOLTAGE__;
+    const dcdcChargingEfficiency = __DCDC_CHARGING_EFFICIENCY__;
+    const monthDays = __MONTH_DAYS__;
+    const dutyFractionMax = __DUTY_FRACTION_MAX__;
+    const dutyPercentScale = __DUTY_PERCENT_SCALE__;
+    const dcVoltageAliases = new Set(["12v", "12 v", "dc", "12 volt", "12 volts"]);
+    const acVoltageAliases = new Set(["ac", "230v", "230 v", "240v", "240 v", "120v", "120 v", "mains"]);
+    const assumptionDefaults = {
+      small: { solarWatts: 200, dcdcAmps: 30, driveMinutes: 60 },
+      medium: { solarWatts: 400, dcdcAmps: 30, driveMinutes: 60 },
+      large: { solarWatts: 600, dcdcAmps: 50, driveMinutes: 60 },
+      xl: { solarWatts: 1000, dcdcAmps: 100, driveMinutes: 60 }
+    };
+    let currentSolarRows = [];
+    let currentAuditTotals = null;
     let generateTimerId = null;
+
+    function formatPercentage(value) {
+      return `${round(value * 100, 0)}%`;
+    }
+
+    function getVanSizeDefaults(vanSize) {
+      return assumptionDefaults[String(vanSize || "").trim().toLowerCase()] || assumptionDefaults.medium;
+    }
+
+    function applyAssumptionDefaults() {
+      const defaults = getVanSizeDefaults(vanSizeSelect.value);
+      solarWattsInput.value = defaults.solarWatts;
+      dcdcAmpsInput.value = defaults.dcdcAmps;
+      driveMinutesInput.value = defaults.driveMinutes;
+      updateMonthlyBalanceChart();
+    }
 
     function formatElapsedSeconds(startTime) {
       return ((performance.now() - startTime) / 1000).toFixed(1);
@@ -972,12 +1097,11 @@ def build_page_html():
         <tr>
           <th>include</th>
           <th>device</th>
-          <th>category</th>
           <th>qty</th>
           <th>voltage</th>
           <th>watts</th>
           <th>hours</th>
-          <th>duty</th>
+          <th>duty (%)</th>
           <th>daily_wh</th>
           <th>source_text</th>
           <th>confidence</th>
@@ -989,7 +1113,6 @@ def build_page_html():
         <tr data-source-text="${escapeHtml(row.source_text || "")}" data-confidence="${escapeHtml(row.confidence ?? "")}">
           <td><input type="checkbox" ${row.include !== false ? "checked" : ""}></td>
           <td contenteditable="true">${escapeHtml(row.name)}</td>
-          <td contenteditable="true">${escapeHtml(row.category)}</td>
           <td contenteditable="true">${escapeHtml(row.quantity)}</td>
           <td contenteditable="true">${escapeHtml(row.voltage)}</td>
           <td contenteditable="true">${escapeHtml(row.watts)}</td>
@@ -1016,10 +1139,6 @@ def build_page_html():
       `).join("");
 
       reviewItemsContainer.innerHTML = `<ul class="review-list">${html}</ul>`;
-    }
-
-    function renderAuditReview(text) {
-      auditReviewBox.textContent = text || "No audit review right now.";
     }
 
     function round(value, decimals = 2) {
@@ -1059,7 +1178,7 @@ def build_page_html():
     async function fetchNasaSolar(lat, lon) {
       const url = [
         "https://power.larc.nasa.gov/api/temporal/climatology/point",
-        "?parameters=ALLSKY_SFC_SW_DWN",
+        "?parameters=" + NASA_SOLAR_HOURS_PARAMETER,
         "&community=RE",
         "&format=JSON",
         "&latitude=" + encodeURIComponent(lat),
@@ -1072,7 +1191,7 @@ def build_page_html():
       }
 
       const data = await response.json();
-      const param = data?.properties?.parameter?.ALLSKY_SFC_SW_DWN;
+      const param = data?.properties?.parameter?.[NASA_SOLAR_HOURS_PARAMETER];
       if (!param) {
         throw new Error("Solar data returned in an unexpected format.");
       }
@@ -1080,12 +1199,18 @@ def build_page_html():
       return { data, param };
     }
 
+    function mapNasaIrradianceToSolarHours(rawValue) {
+      // The monthly model currently treats NASA POWER ALLSKY_SFC_SW_DWN values as its
+      // "solar hours" input directly, preserving the existing app behaviour.
+      const value = Number(rawValue);
+      return Number.isFinite(value) ? round(value, 2) : null;
+    }
+
     function buildSolarRows(param) {
       return NASA_KEYS.map((key, index) => {
-        const value = Number(param[key]);
         return {
           month: MONTHS[index],
-          solarHours: Number.isFinite(value) ? round(value, 2) : null
+          solarHours: mapNasaIrradianceToSolarHours(param[key])
         };
       });
     }
@@ -1220,6 +1345,7 @@ def build_page_html():
       const { data, param } = await fetchNasaSolar(lat, lon);
       const rows = buildSolarRows(param);
       const displayName = place.display_name || locationValue;
+      currentSolarRows = rows;
 
       solarName.textContent = displayName;
       solarLat.textContent = round(lat, 4);
@@ -1230,6 +1356,7 @@ def build_page_html():
 
       renderSolarTable(rows);
       drawSolarChart(rows, displayName);
+      updateMonthlyBalanceChart();
       solarResults.style.display = "block";
     }
 
@@ -1241,29 +1368,81 @@ def build_page_html():
       return fallback;
     }
 
+    function calculateDailyWh(quantity, watts, hours, dutyPercentage) {
+      return quantity * watts * hours * (dutyPercentage / 100);
+    }
+
+    function calculateDcdcDailyWh(dcdcAmps, driveMinutesPerDay) {
+      return (
+        dcdcAmps
+        * dcdcChargingVoltage
+        * (driveMinutesPerDay / 60)
+        * dcdcChargingEfficiency
+      );
+    }
+
+    function calculateSolarDailyWh(solarWatts, solarHours) {
+      return solarWatts * solarHours * solarSystemEfficiency;
+    }
+
+    function calculateTotalChargeDailyWh(solarDailyWh, dcdcDailyWh) {
+      return solarDailyWh + dcdcDailyWh;
+    }
+
+    function calculateDailyBalanceWh(totalChargeDailyWh, overallDailyLoad) {
+      return totalChargeDailyWh - overallDailyLoad;
+    }
+
+    function calculateMonthlyBalanceWh(dailyBalanceWh, daysInMonth) {
+      return dailyBalanceWh * daysInMonth;
+    }
+
+    function normalizeDutyPercentage(rawValue) {
+      let dutyValue = toNumber(rawValue, dutyPercentScale);
+
+      if (dutyValue <= dutyFractionMax) {
+        dutyValue *= dutyPercentScale;
+      }
+
+      return Math.max(dutyValue, 0);
+    }
+
+    function normalizeVoltageCategory(rawValue) {
+      const voltageValue = String(rawValue || "").trim().toLowerCase();
+
+      if (dcVoltageAliases.has(voltageValue)) {
+        return "12v";
+      }
+
+      if (acVoltageAliases.has(voltageValue)) {
+        return "ac";
+      }
+
+      return voltageValue;
+    }
+
     function readRowsFromTable() {
       const rows = [];
       const tableRows = tableContainer.querySelectorAll("table tr");
 
       for (let index = 1; index < tableRows.length; index += 1) {
         const cells = tableRows[index].querySelectorAll("td");
-        if (cells.length !== 12) {
+        if (cells.length !== 11) {
           continue;
         }
 
         rows.push({
           include: cells[0].querySelector('input[type="checkbox"]').checked,
           name: cells[1].textContent.trim(),
-          category: cells[2].textContent.trim(),
-          quantity: toNumber(cells[3].textContent.trim(), 1),
-          voltage: cells[4].textContent.trim().toLowerCase(),
-          watts: toNumber(cells[5].textContent.trim()),
-          hours: toNumber(cells[6].textContent.trim()),
-          duty: toNumber(cells[7].textContent.trim(), 1),
-          daily_wh: toNumber(cells[8].textContent.trim()),
-          source_text: cells[9].textContent.trim(),
-          confidence: toNumber(cells[10].textContent.trim(), 0),
-          assumption_note: cells[11].textContent.trim()
+          quantity: toNumber(cells[2].textContent.trim(), 1),
+          voltage: normalizeVoltageCategory(cells[3].textContent.trim()),
+          watts: toNumber(cells[4].textContent.trim()),
+          hours: toNumber(cells[5].textContent.trim()),
+          duty: normalizeDutyPercentage(cells[6].textContent.trim()),
+          daily_wh: toNumber(cells[7].textContent.trim()),
+          source_text: cells[8].textContent.trim(),
+          confidence: toNumber(cells[9].textContent.trim(), 0),
+          assumption_note: cells[10].textContent.trim()
         });
       }
 
@@ -1275,7 +1454,7 @@ def build_page_html():
       let acTotal = 0;
 
       const updatedRows = rows.map((row) => {
-        const dailyWh = row.quantity * row.watts * row.hours * row.duty;
+        const dailyWh = calculateDailyWh(row.quantity, row.watts, row.hours, row.duty);
 
         if (!row.include) {
           return {
@@ -1296,6 +1475,8 @@ def build_page_html():
         };
       });
 
+      updatedRows.sort((left, right) => right.daily_wh - left.daily_wh);
+
       return {
         rows: updatedRows,
         totals: {
@@ -1314,10 +1495,181 @@ def build_page_html():
       `;
     }
 
+    function getSystemAssumptions() {
+      return {
+        solarWatts: Math.max(0, toNumber(solarWattsInput.value)),
+        dcdcAmps: Math.max(0, toNumber(dcdcAmpsInput.value)),
+        driveMinutesPerDay: Math.max(0, toNumber(driveMinutesInput.value))
+      };
+    }
+
+    function buildMonthlyEnergyData(monthlySolarRows, totals, assumptions) {
+      if (!monthlySolarRows || monthlySolarRows.length !== 12 || !totals) {
+        return MONTHS.map((month) => ({
+          month,
+          powerUseDailyWh: 0,
+          solarGeneratedDailyWh: 0,
+          dcdcContributionDailyWh: 0,
+          totalChargeDailyWh: 0,
+          dailyBalanceWh: 0,
+          monthlyBalanceWh: 0
+        }));
+      }
+
+      const overallDailyLoad = Math.max(0, toNumber(totals.overall_total));
+      const dcdcDailyWh = calculateDcdcDailyWh(
+        assumptions.dcdcAmps,
+        assumptions.driveMinutesPerDay
+      );
+
+      return monthlySolarRows.map((row, index) => {
+        const solarHours = Math.max(0, toNumber(row.solarHours));
+        const solarDailyWh = calculateSolarDailyWh(assumptions.solarWatts, solarHours);
+        const totalChargeDailyWh = calculateTotalChargeDailyWh(solarDailyWh, dcdcDailyWh);
+        const dailyBalanceWh = calculateDailyBalanceWh(totalChargeDailyWh, overallDailyLoad);
+        const monthlyBalanceWh = calculateMonthlyBalanceWh(dailyBalanceWh, monthDays[index]);
+
+        return {
+          month: row.month || MONTHS[index],
+          powerUseDailyWh: round(overallDailyLoad, 2),
+          solarGeneratedDailyWh: round(solarDailyWh, 2),
+          dcdcContributionDailyWh: round(dcdcDailyWh, 2),
+          totalChargeDailyWh: round(totalChargeDailyWh, 2),
+          dailyBalanceWh: round(dailyBalanceWh, 2),
+          monthlyBalanceWh: round(monthlyBalanceWh, 2)
+        };
+      });
+    }
+
+    function drawMonthlyBalanceChart(monthlyData) {
+      const width = balanceCanvas.width;
+      const height = balanceCanvas.height;
+      const values = monthlyData.map((row) => toNumber(row.monthlyBalanceWh));
+      const maxMagnitude = Math.max(1, ...values.map((value) => Math.abs(value)));
+      const pad = { l: 90, r: 28, t: 38, b: 90 };
+      const plotWidth = width - pad.l - pad.r;
+      const plotHeight = height - pad.t - pad.b;
+      const centerY = pad.t + plotHeight / 2;
+      const gap = 10;
+      const barWidth = (plotWidth - gap * (monthlyData.length - 1)) / monthlyData.length;
+
+      balanceCtx.clearRect(0, 0, width, height);
+      balanceCtx.fillStyle = "#fff";
+      balanceCtx.fillRect(0, 0, width, height);
+
+      balanceCtx.fillStyle = "#0f172a";
+      balanceCtx.font = "bold 22px system-ui";
+      balanceCtx.textAlign = "left";
+      balanceCtx.textBaseline = "top";
+      balanceCtx.fillText("Monthly Energy Balance", 24, 18);
+
+      balanceCtx.strokeStyle = "#cbd5e1";
+      balanceCtx.lineWidth = 2;
+      balanceCtx.beginPath();
+      balanceCtx.moveTo(pad.l, centerY);
+      balanceCtx.lineTo(pad.l + plotWidth, centerY);
+      balanceCtx.stroke();
+
+      balanceCtx.fillStyle = "#475569";
+      balanceCtx.font = "13px system-ui";
+      balanceCtx.textAlign = "right";
+      balanceCtx.textBaseline = "middle";
+      balanceCtx.fillText("0", pad.l - 12, centerY);
+
+      for (let i = 0; i < 4; i += 1) {
+        const ratio = (i + 1) / 4;
+        const upperY = centerY - plotHeight * 0.5 * ratio;
+        const lowerY = centerY + plotHeight * 0.5 * ratio;
+        const labelValue = round(maxMagnitude * ratio, 0);
+
+        balanceCtx.strokeStyle = "#e2e8f0";
+        balanceCtx.lineWidth = 1;
+        balanceCtx.beginPath();
+        balanceCtx.moveTo(pad.l, upperY);
+        balanceCtx.lineTo(pad.l + plotWidth, upperY);
+        balanceCtx.moveTo(pad.l, lowerY);
+        balanceCtx.lineTo(pad.l + plotWidth, lowerY);
+        balanceCtx.stroke();
+
+        balanceCtx.fillStyle = "#64748b";
+        balanceCtx.fillText(String(labelValue), pad.l - 12, upperY);
+        balanceCtx.fillText(String(-labelValue), pad.l - 12, lowerY);
+      }
+
+      for (let i = 0; i < monthlyData.length; i += 1) {
+        const value = toNumber(monthlyData[i].monthlyBalanceWh);
+        const scaledHeight = (Math.abs(value) / maxMagnitude) * (plotHeight / 2 - 18);
+        const x = pad.l + i * (barWidth + gap);
+        const y = value >= 0 ? centerY - scaledHeight : centerY;
+        const radius = Math.min(10, barWidth / 2, scaledHeight / 2 || 0);
+
+        balanceCtx.fillStyle = value >= 0 ? "#22c55e" : "#dc2626";
+        balanceCtx.beginPath();
+        balanceCtx.moveTo(x + radius, y);
+        balanceCtx.arcTo(x + barWidth, y, x + barWidth, y + scaledHeight, radius);
+        balanceCtx.arcTo(x + barWidth, y + scaledHeight, x, y + scaledHeight, radius);
+        balanceCtx.arcTo(x, y + scaledHeight, x, y, radius);
+        balanceCtx.arcTo(x, y, x + barWidth, y, radius);
+        balanceCtx.closePath();
+        balanceCtx.fill();
+
+        balanceCtx.fillStyle = "#0f172a";
+        balanceCtx.font = "14px system-ui";
+        balanceCtx.textAlign = "center";
+        balanceCtx.textBaseline = "top";
+        balanceCtx.fillText(monthlyData[i].month, x + barWidth / 2, pad.t + plotHeight + 12);
+
+        balanceCtx.fillStyle = value >= 0 ? "#166534" : "#991b1b";
+        balanceCtx.font = "12px system-ui";
+        balanceCtx.textBaseline = value >= 0 ? "bottom" : "top";
+        balanceCtx.fillText(
+          String(round(value, 0)),
+          x + barWidth / 2,
+          value >= 0 ? y - 6 : y + scaledHeight + 6
+        );
+      }
+    }
+
+    function renderMonthlyCalculationTable(monthlyData) {
+      const monthCells = monthlyData.map((row) => `<th>${row.month}</th>`).join("");
+
+      function renderValueRow(label, key) {
+        const valueCells = monthlyData.map((row) => `<td>${round(row[key], 0)}</td>`).join("");
+        return `
+          <tr>
+            <td>${label}</td>
+            ${valueCells}
+          </tr>
+        `;
+      }
+
+      balanceTableBody.innerHTML = `
+        <tr>
+          <th>Metric</th>
+          ${monthCells}
+        </tr>
+        ${renderValueRow("Power use (avg daily Wh)", "powerUseDailyWh")}
+        ${renderValueRow("Solar generated (avg daily Wh)", "solarGeneratedDailyWh")}
+        ${renderValueRow("DC-DC contribution (avg daily Wh)", "dcdcContributionDailyWh")}
+        ${renderValueRow("Total charge available (avg daily Wh)", "totalChargeDailyWh")}
+        ${renderValueRow("Daily surplus / shortfall (Wh)", "dailyBalanceWh")}
+      `;
+    }
+
+    function updateMonthlyBalanceChart() {
+      const monthlyData = buildMonthlyEnergyData(
+        currentSolarRows,
+        currentAuditTotals,
+        getSystemAssumptions()
+      );
+      drawMonthlyBalanceChart(monthlyData);
+      renderMonthlyCalculationTable(monthlyData);
+    }
+
     async function generateAudit() {
       const startTime = performance.now();
+      footnotesPanel.classList.remove("hidden");
       startGenerateTimer(startTime);
-      results.classList.add("visible");
 
       const payload = {
         location: document.getElementById("location").value,
@@ -1352,28 +1704,67 @@ def build_page_html():
 
       clearGenerateTimer();
       const result = await response.json();
+      currentAuditTotals = result.totals;
+      results.classList.add("visible");
       renderTable(result.rows);
       renderTotals(result.totals);
       renderReviewItems(result.review_items);
-      renderAuditReview(result.audit_review);
+      updateMonthlyBalanceChart();
       statusBox.textContent = `Solar data and draft audit generated in ${formatElapsedSeconds(startTime)}s`;
     }
 
     generateButton.addEventListener("click", generateAudit);
+    vanSizeSelect.addEventListener("change", applyAssumptionDefaults);
+    solarWattsInput.addEventListener("input", updateMonthlyBalanceChart);
+    dcdcAmpsInput.addEventListener("input", updateMonthlyBalanceChart);
+    driveMinutesInput.addEventListener("input", updateMonthlyBalanceChart);
 
     recalculateButton.addEventListener("click", () => {
       const rows = readRowsFromTable();
       const recalculated = recalculateRows(rows);
+      currentAuditTotals = recalculated.totals;
       renderTable(recalculated.rows);
       renderTotals(recalculated.totals);
+      updateMonthlyBalanceChart();
       statusBox.textContent = "Totals recalculated from the edited table.";
     });
 
+    applyAssumptionDefaults();
+    solarEfficiencyDisplay.textContent = formatPercentage(solarSystemEfficiency);
+    inverterEfficiencyDisplay.textContent = formatPercentage(inverterEfficiency);
+    dcdcVoltageDisplay.textContent = `${round(dcdcChargingVoltage, 1)} V`;
+    dcdcEfficiencyDisplay.textContent = formatPercentage(dcdcChargingEfficiency);
+    footnoteSolarEfficiency.textContent = formatPercentage(solarSystemEfficiency);
+    footnoteInverterEfficiency.textContent = formatPercentage(inverterEfficiency);
+    footnoteDcdcVoltage.textContent = `${round(dcdcChargingVoltage, 1)} V`;
+    footnoteDcdcEfficiency.textContent = formatPercentage(dcdcChargingEfficiency);
+    if (openAiModel) {
+      footnoteAiModel.textContent = openAiModel;
+    } else {
+      footnoteAiModelLine.style.display = "none";
+    }
+    const emptyMonthlyData = buildMonthlyEnergyData([], null, getSystemAssumptions());
+    drawMonthlyBalanceChart(emptyMonthlyData);
+    renderMonthlyCalculationTable(emptyMonthlyData);
     drawSolarChart(MONTHS.map((month) => ({ month, solarHours: 0 })), "Selected location");
   </script>
 </body>
 </html>
-"""
+""".replace("__INVERTER_EFFICIENCY__", json.dumps(INVERTER_EFFICIENCY)).replace(
+        "__SOLAR_SYSTEM_EFFICIENCY__", json.dumps(SOLAR_SYSTEM_EFFICIENCY)
+    ).replace(
+        "__DCDC_CHARGING_VOLTAGE__", json.dumps(DCDC_CHARGING_VOLTAGE)
+    ).replace(
+        "__DCDC_CHARGING_EFFICIENCY__", json.dumps(DCDC_CHARGING_EFFICIENCY)
+    ).replace(
+        "__MONTH_DAYS__", json.dumps(MONTH_DAYS)
+    ).replace(
+        "__DUTY_FRACTION_MAX__", json.dumps(DUTY_FRACTION_MAX)
+    ).replace(
+        "__DUTY_PERCENT_SCALE__", json.dumps(DUTY_PERCENT_SCALE)
+    ).replace(
+        "__OPENAI_MODEL__", json.dumps(OPENAI_MODEL)
+    )
 
 
 if FastAPI is not None:
