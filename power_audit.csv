@@ -1,14 +1,14 @@
-Device,Category,Quantity,Include,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh,Assumption Note
-12V fridge,Appliance,1.0,True,12v,40.0,24.0,0.5,480.0,Typical 40W fridge running 12 hours per day.
-diesel heater fan,Heating,1.0,True,12v,60.0,4.0,0.8,192.0,Assuming fan runs 4 hours at 80% duty on winter trips.
-roof fan,Ventilation,1.0,True,12v,10.0,8.0,0.5,40.0,Runs half the day for ventilation.
-LED lights,Lighting,6.0,True,12v,3.0,4.0,0.5,36.0,"6 lights at 3W each, 4 hours daily."
-phone charger,Device Charger,2.0,True,ac,10.0,2.0,0.5,20.0,Charging duration typical.
-laptop charger,Device Charger,1.0,True,ac,50.0,4.0,0.5,100.0,Laptop used occasionally for work.
-camera battery charger,Device Charger,1.0,True,ac,10.0,1.0,0.5,5.0,Charged briefly during trips.
-drone batteries charger,Device Charger,1.0,True,ac,20.0,1.0,0.5,10.0,Used occasionally.
-water pump,Pump,1.0,True,12v,50.0,0.25,0.5,6.25,Runs briefly to maintain water supply.
-electric blanket,Heating,1.0,True,12v,40.0,6.0,0.8,192.0,Used during winter weekend trips for 6 hours at 80% duty.
-induction hob,Cooking,1.0,True,ac,1500.0,0.5,0.5,375.0,Used occasionally with sessions of around 30 minutes.
+Device,Quantity,Voltage Type,Watts,Hours,Duty Cycle,Daily Wh,Assumption Note
+12V fridge,1,12v,40.0,24.0,100.0,960.0,Assumed continuous operation at 40W average power consumption for 24 hours.
+Induction hob,1,ac,1500.0,1.0,30.0,450.0,Used for 1 hour at 30% duty cycle representing occasional cooking.
+Diesel heater fan,1,12v,40.0,5.0,100.0,200.0,Estimated 5 hours run time during cold nights.
+Electric blanket,1,12v,40.0,8.0,50.0,160.0,Used 8 hours at 50% duty cycle for occasional cold nights.
+Laptop,1,ac,50.0,3.0,100.0,150.0,Laptop charging and usage for 3 hours.
+LED lights,6,12v,3.0,4.0,100.0,72.0,6 lights at 3W each used for 4 hours per day.
+Roof fan,1,12v,10.0,8.0,50.0,40.0,Operates intermittently half the time during ventilation periods.
+Phones,2,ac,10.0,2.0,100.0,40.0,Charging 2 phones at approximately 10W each for 2 hours.
+Drone batteries,1,ac,20.0,1.0,100.0,20.0,Charging drone batteries for 1 hour.
+Camera battery charger,1,ac,10.0,1.0,100.0,10.0,Charging camera batteries for 1 hour.
+Water pump,1,12v,30.0,0.5,20.0,3.0,Runs 30 minutes per day at 20% duty cycle.
 
-Total,,,,,,,,1512.9166666666665,
+Total,,,,,,,2179.4444444444443,
