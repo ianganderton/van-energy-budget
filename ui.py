@@ -468,6 +468,11 @@ def build_page_html():
         <li>The model uses NASA POWER solar irradiance data (kWh/m²/day) for the selected location. In the current model, that irradiance value is used directly as the solar input and then combined with your panel size and the solar system efficiency assumption of <strong id="footnote_solar_efficiency"></strong>.</li>
         <li>Energy income from DC-DC charging is estimated from charger amps, charging voltage, driving time, and charging efficiency. The current charging voltage assumption is <strong id="footnote_dcdc_voltage"></strong> and the current charging efficiency assumption is <strong id="footnote_dcdc_efficiency"></strong>.</li>
         <li>The energy balance compares estimated daily income against estimated daily spending across the year. This helps show when battery storage is likely to stay balanced and when the system may gradually run flat.</li>
+        <li><strong>Model Assumptions (Testing Notes)</strong></li>
+        <li>Some devices use controlled modelling rules rather than relying entirely on AI estimates. These rules help prevent unrealistic energy estimates when users provide brief descriptions.</li>
+        <li><strong>Fridges</strong> Compressor fridges are treated as continuously available appliances. The model assumes 24 hours per day availability, with a duty cycle controlling compressor runtime. Typical duty cycles are constrained to realistic ranges based on compressor fridge behaviour.</li>
+        <li><strong>Induction Cooktops</strong> Induction cooktops are treated as high-power intermittent cooking loads. Energy use is estimated from rated power and a short daily cooking runtime derived from context such as number of occupants, usage pattern, and lifestyle description. Induction hobs often modulate power rather than drawing full rated power continuously, so runtime represents active cooking time rather than continuous load.</li>
+        <li><strong>Testing Note</strong> Rows marked with <strong>[m]</strong> indicate that model rules were applied to determine the device assumptions used in the calculation.</li>
         <li id="footnote_ai_model_line">The draft table currently uses the AI model <strong id="footnote_ai_model"></strong>.</li>
       </ul>
     </div>
