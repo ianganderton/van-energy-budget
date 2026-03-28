@@ -15,7 +15,7 @@ AI-assisted tool that converts plain-language descriptions of van electrical dev
 
 ## Architecture
 
-The project is intentionally minimal and currently lives in a single file: [`app.py`](/Users/ianganderton/Development/ogm/app.py).
+The project is intentionally minimal and split into a few focused modules.
 
 Architecture summary:
 
@@ -44,7 +44,7 @@ Key backend helpers:
 Install dependencies:
 
 ```bash
-pip install fastapi uvicorn openai
+pip install -r requirements.txt
 ```
 
 Set environment variables:
@@ -54,10 +54,10 @@ export OPENAI_API_KEY="your_api_key_here"
 export OPENAI_MODEL="gpt-4.1-mini"
 ```
 
-Run the app:
+Run the app in local development mode:
 
 ```bash
-python app.py
+uvicorn app:app --reload
 ```
 
 Then open `http://127.0.0.1:8000` in your browser.
@@ -66,6 +66,52 @@ Then open `http://127.0.0.1:8000` in your browser.
 
 - `OPENAI_API_KEY`: required for the OpenAI request path.
 - `OPENAI_MODEL`: optional override for the primary model. Defaults to `gpt-4.1-mini`.
+
+Deployment note:
+
+- Keep `OPENAI_API_KEY` in the deployment environment or secret store rather than hardcoding it in source or committing it to the repository.
+- Non-secret defaults remain in [`config.py`](/Users/ianganderton/Development/ogm/config.py).
+
+## Production-style runtime
+
+Run the app with a standard ASGI server command:
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}
+```
+
+This works well for deployment platforms that provide the port through an environment variable.
+
+## Health check
+
+The app exposes a lightweight health endpoint:
+
+```http
+GET /health
+```
+
+Expected response:
+
+```json
+{ "status": "ok" }
+```
+
+The health check does not trigger AI calls, solar API calls, or other expensive work.
+
+## Deployment
+
+This project is compatible with standard ASGI deployment platforms such as:
+
+- Render
+- Railway
+- Fly.io
+
+It is deployment-friendly because it:
+
+- exposes a standard FastAPI ASGI app as `app:app`
+- reads configuration from environment variables
+- keeps secrets out of source control
+- provides a simple `GET /health` endpoint for platform health checks
 
 ## OpenAI Integration
 
