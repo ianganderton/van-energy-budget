@@ -233,7 +233,7 @@ def extract_audit_with_openai(user_profile, request_start_time=None):
 
         try:
             parsed_result = json.loads(raw_text)
-            normalized_result = normalize_ai_result(parsed_result)
+            normalized_result = normalize_ai_result(parsed_result, user_profile=user_profile)
             log_timing("JSON parse / normalisation complete", request_start_time or openai_call_start, model=model_name)
             normalized_result["raw_response_text"] = raw_text
             return normalized_result
